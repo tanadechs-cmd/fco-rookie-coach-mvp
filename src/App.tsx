@@ -1,9 +1,9 @@
 import { useState, useRef, useEffect } from "react";
-import { MessageCircle, LogOut, Send, Globe, Play, ArrowLeft, Calendar, BookOpen, GitBranch, Eye, Search, ExternalLink, Clock } from "lucide-react";
+import { MessageCircle, LogOut, Send, Globe, Play, Calendar, BookOpen, GitBranch, Eye, Search, ExternalLink, Clock, LockKeyhole } from "lucide-react";
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
-type Role = "player" | "admin";
+type Role = "player";
 type PlayerTab = "chat" | "notifications";
 type ChipMode = "diagnose" | "deeper" | "post-video" | "want-tip";
 type Day = 1 | 2 | 3;
@@ -1088,7 +1088,7 @@ function Composer({
 
 // ── LoginScreen ────────────────────────────────────────────────────────────────
 
-function LoginScreen({ onLogin, onAdmin }: { onLogin: () => void; onAdmin: () => void }) {
+function LoginScreen({ onLogin }: { onLogin: () => void }) {
   const [loading, setLoading] = useState(false);
 
   function simulate() {
@@ -1147,14 +1147,81 @@ function LoginScreen({ onLogin, onAdmin }: { onLogin: () => void; onAdmin: () =>
             {loading ? "กำลังเข้าสู่ระบบ..." : "ทดลองใช้งาน"}
           </button>
 
-          <button
-            onClick={onAdmin}
-            className="text-xs text-center mt-1 transition-opacity hover:opacity-60"
-            style={{ color: "var(--muted-foreground)" }}
-          >
-            ดูหน้า Admin
-          </button>
         </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Admin gateway ─────────────────────────────────────────────────────────────
+
+type AdminSessionState = "checking" | "signed-out" | "authenticated" | "unconfigured";
+
+function AdminLoginScreen({ onAuthenticated }: { onAuthenticated: () => void }) {
+  const [password, setPassword] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+
+  async function submit(event: React.FormEvent) {
+    event.preventDefault();
+    if (!password || loading) return;
+    setLoading(true);
+    setError("");
+
+    try {
+      const response = await fetch("/api/admin/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ password }),
+      });
+
+      if (!response.ok) {
+        const body = await response.json().catch(() => ({}));
+        setError(body.code === "ADMIN_NOT_CONFIGURED" ? "ระบบหลังบ้านยังไม่ได้ตั้งค่า" : "รหัสผ่านไม่ถูกต้อง");
+        return;
+      }
+
+      setPassword("");
+      onAuthenticated();
+    } catch {
+      setError("เชื่อมต่อระบบหลังบ้านไม่ได้ กรุณาลองใหม่");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <div className="min-h-screen flex items-center justify-center p-6" style={{ backgroundColor: "var(--background)" }}>
+      <div className="w-full max-w-sm rounded-2xl border p-7" style={{ borderColor: "var(--border)", backgroundColor: "var(--background)" }}>
+        <div className="w-11 h-11 rounded-full flex items-center justify-center mb-5" style={{ backgroundColor: "rgba(196,30,30,0.08)", color: "var(--primary)" }}>
+          <LockKeyhole size={20} aria-hidden />
+        </div>
+        <p className="text-[10px] font-semibold tracking-widest uppercase" style={{ color: "var(--primary)" }}>FCO Rookie Coach</p>
+        <h1 className="text-xl font-bold mt-1" style={{ color: "var(--foreground)" }}>เข้าสู่ระบบหลังบ้าน</h1>
+        <p className="text-sm mt-2" style={{ color: "var(--muted-foreground)" }}>สำหรับทีมงานที่ได้รับอนุญาตเท่านั้น</p>
+
+        <form onSubmit={submit} className="mt-6 space-y-3">
+          <label className="block text-xs font-medium" htmlFor="admin-password" style={{ color: "var(--foreground)" }}>รหัสผ่าน Admin</label>
+          <input
+            id="admin-password"
+            type="password"
+            autoComplete="current-password"
+            value={password}
+            onChange={(event) => setPassword(event.target.value)}
+            className="w-full h-11 rounded-lg border px-3 text-sm outline-none focus:ring-2"
+            style={{ borderColor: "var(--border)", backgroundColor: "var(--background)", color: "var(--foreground)" }}
+            placeholder="กรอกรหัสผ่าน"
+          />
+          {error ? <p role="alert" className="text-xs" style={{ color: "var(--primary)" }}>{error}</p> : null}
+          <button
+            type="submit"
+            disabled={!password || loading}
+            className="w-full h-11 rounded-lg text-sm font-semibold transition-opacity disabled:opacity-50"
+            style={{ backgroundColor: "var(--primary)", color: "var(--primary-foreground)" }}
+          >
+            {loading ? "กำลังตรวจสอบ..." : "เข้าสู่ระบบหลังบ้าน"}
+          </button>
+        </form>
       </div>
     </div>
   );
@@ -2956,11 +3023,11 @@ function AdminUnansweredQuestions({
 // ── AdminView ──────────────────────────────────────────────────────────────────
 
 function AdminView({
-  onBack,
+  onLogout,
   reportedQuestions,
   setReportedQuestions,
 }: {
-  onBack: () => void;
+  onLogout: () => void;
   reportedQuestions: ReportedQuestion[];
   setReportedQuestions: (fn: (prev: ReportedQuestion[]) => ReportedQuestion[]) => void;
 }) {
@@ -2987,14 +3054,14 @@ function AdminView({
         aria-label="Admin navigation"
       >
         <button
-          onClick={onBack}
+          onClick={onLogout}
           className="mx-2 mb-3 flex items-center gap-2 px-3 py-2 rounded-md text-xs transition-colors text-left"
           style={{ color: "var(--muted-foreground)" }}
           onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = "var(--muted)")}
           onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = "transparent")}
         >
-          <ArrowLeft size={13} aria-hidden />
-          กลับหน้า Player
+          <LogOut size={13} aria-hidden />
+          ออกจากระบบหลังบ้าน
         </button>
 
         <div className="px-4 mb-4">
@@ -3044,11 +3111,72 @@ function AdminView({
   );
 }
 
+function AdminRoute() {
+  const [session, setSession] = useState<AdminSessionState>("checking");
+  const [reportedQuestions, setReportedQuestions] = useState<ReportedQuestion[]>(INITIAL_REPORTED_QUESTIONS);
+
+  useEffect(() => {
+    let active = true;
+    fetch("/api/admin/session", { cache: "no-store" })
+      .then(async (response) => {
+        if (!active) return;
+        if (response.ok) setSession("authenticated");
+        else {
+          const body = await response.json().catch(() => ({}));
+          setSession(body.code === "ADMIN_NOT_CONFIGURED" ? "unconfigured" : "signed-out");
+        }
+      })
+      .catch(() => {
+        if (active) setSession("signed-out");
+      });
+    return () => { active = false; };
+  }, []);
+
+  async function logout() {
+    await fetch("/api/admin/logout", { method: "POST" }).catch(() => undefined);
+    setSession("signed-out");
+  }
+
+  if (session === "checking") {
+    return (
+      <div className="min-h-screen flex items-center justify-center text-sm" style={{ backgroundColor: "var(--background)", color: "var(--muted-foreground)" }}>
+        กำลังตรวจสอบสิทธิ์...
+      </div>
+    );
+  }
+
+  if (session === "unconfigured") {
+    return (
+      <div className="min-h-screen flex items-center justify-center p-6" style={{ backgroundColor: "var(--background)" }}>
+        <div className="max-w-sm rounded-xl border p-6 text-center" style={{ borderColor: "var(--border)" }}>
+          <LockKeyhole className="mx-auto mb-3" size={22} style={{ color: "var(--primary)" }} aria-hidden />
+          <h1 className="font-bold" style={{ color: "var(--foreground)" }}>ระบบหลังบ้านยังไม่พร้อม</h1>
+          <p className="text-sm mt-2" style={{ color: "var(--muted-foreground)" }}>กรุณาตั้งค่า Admin credentials ฝั่งเซิร์ฟเวอร์ก่อนใช้งาน</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (session !== "authenticated") {
+    return <AdminLoginScreen onAuthenticated={() => setSession("authenticated")} />;
+  }
+
+  return (
+    <AdminView
+      onLogout={logout}
+      reportedQuestions={reportedQuestions}
+      setReportedQuestions={setReportedQuestions}
+    />
+  );
+}
+
 // ── App ────────────────────────────────────────────────────────────────────────
 
 export default function App() {
   const [role, setRole] = useState<Role | null>(null);
   const [reportedQuestions, setReportedQuestions] = useState<ReportedQuestion[]>(INITIAL_REPORTED_QUESTIONS);
+
+  const isAdminRoute = window.location.pathname === "/admin" || window.location.pathname.startsWith("/admin/");
 
   function handleReportQuestion(question: string, recentContext: string) {
     const normalized = question.trim().toLowerCase();
@@ -3075,17 +3203,9 @@ export default function App() {
     });
   }
 
-  if (role === null)
-    return <LoginScreen onLogin={() => setRole("player")} onAdmin={() => setRole("admin")} />;
+  if (isAdminRoute) return <AdminRoute />;
 
-  if (role === "admin")
-    return (
-      <AdminView
-        onBack={() => setRole(null)}
-        reportedQuestions={reportedQuestions}
-        setReportedQuestions={setReportedQuestions}
-      />
-    );
+  if (role === null) return <LoginScreen onLogin={() => setRole("player")} />;
 
   return <CoachScreen onLogout={() => setRole(null)} onReportQuestion={handleReportQuestion} />;
 }
