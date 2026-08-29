@@ -1,0 +1,54 @@
+@import url('https://fonts.googleapis.com/css2?family=Noto+Sans+Thai:wght@300;400;500;600;700&display=swap');
+@import 'tailwindcss';
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+:root {
+  --background: #F7F5F0;
+  --foreground: #2A2825;
+  --card: #FFFFFF;
+  --card-foreground: #2A2825;
+  --primary: #C41E1E;
+  --primary-foreground: #FFFFFF;
+  --muted: #EDE9E3;
+  --muted-foreground: #7A7470;
+  --accent: #2B6C3A;
+  --accent-foreground: #FFFFFF;
+  --border: #E3DED6;
+  --ring: #C41E1E;
+}
+
+body {
+  font-family: 'Noto Sans Thai', system-ui, -apple-system, sans-serif;
+  background-color: var(--background);
+  color: var(--foreground);
+  -webkit-font-smoothing: antialiased;
+}
+
+:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: transparent;
+  border-radius: 3px;
+  transition: background 0.2s;
+}
+*:hover > ::-webkit-scrollbar-thumb,
+.overflow-y-auto:hover::-webkit-scrollbar-thumb,
+.overflow-x-auto:hover::-webkit-scrollbar-thumb {
+  background: var(--border);
+}

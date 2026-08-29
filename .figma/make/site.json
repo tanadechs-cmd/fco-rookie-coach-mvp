@@ -1,0 +1,10 @@
+{
+  "description": "Provides Thai FC Online newcomers with a simple, interactive coaching interface offering daily tips, chat support, and practice guidance to boost gameplay confidence.",
+  "robots": {
+    "index": false
+  },
+  "accessibility": {
+    "addBypassLinks": false,
+    "ignoreReducedMotion": false
+  }
+}
