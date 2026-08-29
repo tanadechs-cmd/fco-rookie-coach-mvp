@@ -9,17 +9,43 @@ type InseaEvent = {
   content?: unknown;
   conversation_id?: unknown;
   conversationId?: unknown;
+  data?: {
+    conversation_id?: unknown;
+    message?: { text?: unknown; type?: unknown };
+    outputs?: { answer?: unknown; conversation_id?: unknown };
+  };
   delta?: unknown;
-  message?: unknown;
+  message?: unknown | { text?: unknown; type?: unknown };
   text?: unknown;
 };
 
 function appendText(parts: string[], event: InseaEvent) {
+  const nestedMessage =
+    event.message && typeof event.message === "object"
+      ? (event.message as { text?: unknown; type?: unknown })
+      : undefined;
+  const dataMessage = event.data?.message;
   const candidate =
-    event.answer ?? event.delta ?? event.text ?? event.content ?? event.message;
+    event.answer ??
+    event.delta ??
+    event.text ??
+    event.content ??
+    (nestedMessage?.type === "text" ? nestedMessage.text : undefined) ??
+    (dataMessage?.type === "text" ? dataMessage.text : undefined) ??
+    event.data?.outputs?.answer ??
+    (typeof event.message === "string" ? event.message : undefined);
   if (typeof candidate === "string" && candidate.trim()) {
     parts.push(candidate);
   }
+}
+
+function readConversationId(event: InseaEvent) {
+  const candidate =
+    event.conversation_id ??
+    event.conversationId ??
+    event.data?.conversation_id ??
+    event.data?.outputs?.conversation_id;
+  return typeof candidate === "string" ? candidate : undefined;
 }
 
 function parseInseaResponse(raw: string, contentType: string) {
@@ -34,8 +60,7 @@ function parseInseaResponse(raw: string, contentType: string) {
       try {
         const event = JSON.parse(payload) as InseaEvent;
         appendText(parts, event);
-        const nextId = event.conversation_id ?? event.conversationId;
-        if (typeof nextId === "string") conversationId = nextId;
+        conversationId = readConversationId(event) ?? conversationId;
       } catch {
         // Ignore non-JSON SSE keepalive events.
       }
@@ -44,8 +69,7 @@ function parseInseaResponse(raw: string, contentType: string) {
     try {
       const event = JSON.parse(raw) as InseaEvent;
       appendText(parts, event);
-      const nextId = event.conversation_id ?? event.conversationId;
-      if (typeof nextId === "string") conversationId = nextId;
+      conversationId = readConversationId(event) ?? conversationId;
     } catch {
       if (raw.trim()) parts.push(raw.trim());
     }
