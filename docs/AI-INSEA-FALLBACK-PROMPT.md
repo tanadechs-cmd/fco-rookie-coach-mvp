@@ -4,6 +4,7 @@
 
 - Model: `GPT-5.6 Terra`
 - Contextual memory: on, 8 messages
+- Web-provided context: last 6 user/assistant messages plus selected input method
 - Persistent memory: off
 - Output: JSON only
 
@@ -106,4 +107,4 @@ Output: {"answer":"ผมช่วยตอบเฉพาะเรื่อง 
 7. Out-of-scope questions are declined without links.
 8. Output is valid JSON with no more than two approved action IDs.
 9. No response identifies itself as AI or mentions internal Educational Hub matching.
-10. Follow-up questions use recent context but no memory persists across sessions.
+10. Follow-up questions use the last 6 web messages and AI-INsea contextual memory, but no AI memory persists across sessions.

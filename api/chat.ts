@@ -2,6 +2,8 @@ import type { VercelRequest, VercelResponse } from "@vercel/node";
 
 const DEFAULT_CHATFLOW_URL = "https://ai.insea.io/api/chatflows/24426/run";
 const MAX_QUERY_LENGTH = 2_000;
+const MAX_CONTEXT_MESSAGES = 6;
+const MAX_CONTEXT_LENGTH = 3_000;
 const REQUEST_TIMEOUT_MS = 20_000;
 const ACTION_IDS = [
   "education_hub",
@@ -11,6 +13,7 @@ const ACTION_IDS = [
 ] as const;
 
 type ActionId = (typeof ACTION_IDS)[number];
+type ContextMessage = { role: "user" | "assistant"; text: string };
 
 type InseaEvent = {
   answer?: unknown;
@@ -110,6 +113,22 @@ function parseStructuredAnswer(rawAnswer: string) {
   }
 }
 
+function readContext(value: unknown): ContextMessage[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((item): item is ContextMessage => {
+      if (!item || typeof item !== "object") return false;
+      const candidate = item as { role?: unknown; text?: unknown };
+      return (
+        (candidate.role === "user" || candidate.role === "assistant") &&
+        typeof candidate.text === "string" &&
+        candidate.text.trim().length > 0
+      );
+    })
+    .slice(-MAX_CONTEXT_MESSAGES)
+    .map((item) => ({ role: item.role, text: item.text.trim().slice(0, 500) }));
+}
+
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   res.setHeader("Cache-Control", "no-store");
 
@@ -147,6 +166,20 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
 
   try {
+    const context = readContext(req.body?.context);
+    const inputMethod = req.body?.inputMethod === "keyboard"
+      ? "คีย์บอร์ด"
+      : req.body?.inputMethod === "playstation"
+        ? "จอย PlayStation (ปุ่ม □ △ ○ ✕)"
+        : "จอย Xbox (ปุ่ม XYAB)";
+    const contextText = context
+      .map((message) => `${message.role === "user" ? "ผู้เล่น" : "โค้ช"}: ${message.text}`)
+      .join("\n")
+      .slice(-MAX_CONTEXT_LENGTH);
+    const contextualQuery = contextText
+      ? `บริบทล่าสุด (ใช้เพื่อเข้าใจคำถามต่อเนื่อง ห้ามทวนคำตอบเดิม):\n${contextText}\n\nอุปกรณ์ควบคุมที่ผู้เล่นเลือก: ${inputMethod}\nคำถามล่าสุด: ${query}`
+      : `อุปกรณ์ควบคุมที่ผู้เล่นเลือก: ${inputMethod}\nคำถามล่าสุด: ${query}`;
+
     const upstream = await fetch(url, {
       method: "POST",
       headers: {
@@ -154,7 +187,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        query,
+        query: contextualQuery,
         conversation_id:
           typeof req.body?.conversationId === "string"
             ? req.body.conversationId

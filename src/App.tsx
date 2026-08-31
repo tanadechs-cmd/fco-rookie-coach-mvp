@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from "react";
-import { MessageCircle, LogOut, Send, Globe, Play, BookOpen, GitBranch, Eye, Search, ExternalLink, Clock, LockKeyhole } from "lucide-react";
+import { MessageCircle, LogOut, Send, Globe, Play, BookOpen, GitBranch, Eye, Search, ExternalLink, Clock, LockKeyhole, Keyboard, Gamepad2, History } from "lucide-react";
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -10,6 +10,7 @@ type ChipMode = "activation" | "competence" | "next-goal" | "post-content";
 type Day = 1 | 2 | 3;
 type JourneyStageId = "activation" | "competence" | "next-goal";
 type ResponseActionId = "education_hub" | "discord" | "customer_support" | "report_question";
+type ControlScheme = "keyboard" | "xbox" | "playstation";
 
 interface AppNotification {
   id: string;
@@ -51,6 +52,25 @@ interface Message {
   actions?: ResponseActionId[];
 }
 
+interface ChatAnswerConfig {
+  id: string;
+  title: string;
+  text: string;
+  keyboardSteps: string[];
+  xboxSteps: string[];
+  playstationSteps: string[];
+  source: string;
+}
+
+interface FaqConfigItem {
+  id: string;
+  question: string;
+  stageId: JourneyStageId;
+  topicId: string;
+  secondaryTopicId?: string;
+  trigger: string;
+}
+
 
 interface ContentFlow {
   id: string;
@@ -74,6 +94,9 @@ interface ContentBranch {
 type DeliveryDay = Day;
 type DeliveryChannel = "notification" | "chat";
 type DeliveryTrigger = "segment_selected" | "session_start" | "after_response" | "content_completed" | "unresolved_return" | "before_handoff";
+type ConfigSection = "faq_content" | "proactive_messages";
+type SharedConfigStatus = "loading" | "ready" | "local-fallback";
+type SaveState = "idle" | "saving" | "saved" | "error";
 
 interface DailyDeliveryPlan {
   id: string;
@@ -92,7 +115,7 @@ interface DailyDeliveryPlan {
   status: "active" | "draft";
 }
 
-type AdminTab = "overview" | "proactive-messages" | "faq-content" | "unanswered" | "preview";
+type AdminTab = "overview" | "proactive-messages" | "faq-content" | "unanswered" | "preview" | "history";
 
 interface ReportedQuestion {
   id: string;
@@ -104,6 +127,41 @@ interface ReportedQuestion {
   lastSeen: string;
   status: "new" | "reviewing" | "content-added" | "ignored";
   recentContext: string;
+}
+
+interface ConfigVersion {
+  id: string;
+  revision: number;
+  changedSection: string;
+  createdAt: string;
+  createdBy: string;
+}
+
+function parseReportedQuestion(raw: unknown): ReportedQuestion | null {
+  if (!raw || typeof raw !== "object") return null;
+  const question = raw as Record<string, unknown>;
+  const status = question.status;
+  if (
+    typeof question.id !== "string" ||
+    typeof question.question !== "string" ||
+    ![1, 2, 3].includes(question.onboardingDay as number) ||
+    !Number.isInteger(question.count) ||
+    typeof question.firstSeen !== "string" ||
+    typeof question.lastSeen !== "string" ||
+    typeof question.recentContext !== "string" ||
+    !["new", "reviewing", "content-added", "ignored"].includes(status as string)
+  ) return null;
+  return {
+    id: question.id,
+    question: question.question,
+    onboardingDay: question.onboardingDay as DeliveryDay,
+    relatedTopicId: typeof question.relatedTopicId === "string" ? question.relatedTopicId : undefined,
+    count: question.count as number,
+    firstSeen: question.firstSeen,
+    lastSeen: question.lastSeen,
+    status: status as ReportedQuestion["status"],
+    recentContext: question.recentContext,
+  };
 }
 
 // ── Metadata constants ─────────────────────────────────────────────────────────
@@ -857,6 +915,17 @@ function matchKnowledge(text: string): KnowledgeItem | undefined {
   return best ? (best as Candidate).item : undefined;
 }
 
+function isMoneyQuestion(text: string): boolean {
+  const q = text.toLowerCase().replace(/\s+/g, "");
+  return (
+    q.includes("หาเงิน") ||
+    q.includes("หาbp") ||
+    q.includes("เงินมาจากไหน") ||
+    q.includes("ได้เงินยังไง") ||
+    q.includes("เงินไม่พอ")
+  );
+}
+
 function formatDuration(sec: number): string {
   if (sec >= 60) {
     return `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, "0")} น.`;
@@ -866,22 +935,36 @@ function formatDuration(sec: number): string {
 
 // ── Canned answers ─────────────────────────────────────────────────────────────
 
-type CannedAnswer = { text: string; steps?: string[]; source?: string };
+type CannedAnswer = { text: string; keyboardSteps?: string[]; xboxSteps?: string[]; playstationSteps?: string[]; source?: string };
 
 const CANNED: Record<string, CannedAnswer> = {
   controller: {
-    text: "ต่อจอยกับคอมแล้วเข้าเมนู ควบคุม เพื่อตั้งค่า",
-    steps: ["เสียบจอย USB หรือเชื่อม Bluetooth", "เลือกแผนปุ่ม Classic", "ทดลองในสนามฝึก"],
+    text: "ตั้งค่าอุปกรณ์ควบคุมก่อนลงสนาม จะช่วยให้จำปุ่มได้เร็วขึ้น",
+    keyboardSteps: ["เข้า Settings > Control", "เลือก Keyboard และเช็กปุ่มที่ถนัด", "ทดลองในสนามฝึกก่อนลงแข่ง"],
+    xboxSteps: ["เสียบ USB หรือเชื่อม Bluetooth", "เข้า Settings > Control แล้วเลือก Xbox Controller", "ทดลองปุ่ม XYAB ในสนามฝึก"],
+    playstationSteps: ["เสียบ USB หรือเชื่อม Bluetooth", "เข้า Settings > Control แล้วเลือก PlayStation Controller", "ทดลองปุ่ม □ △ ○ ✕ ในสนามฝึก"],
     source: "FC Online Education Hub",
   },
   "welcome-pass": {
     text: "ใช้ 1 BP รับทีมเริ่มต้นพร้อมเดินหน้าได้เลย",
-    steps: ["เข้าเมนู Welcome Pass", "จ่าย 1 BP", "รับทีมและไอเทมเริ่มต้น"],
+    keyboardSteps: ["เข้าเมนู Welcome Pass", "จ่าย 1 BP", "รับทีมและไอเทมเริ่มต้น"],
+    xboxSteps: ["เข้าเมนู Welcome Pass", "จ่าย 1 BP", "รับทีมและไอเทมเริ่มต้น"],
+    playstationSteps: ["เข้าเมนู Welcome Pass", "จ่าย 1 BP", "รับทีมและไอเทมเริ่มต้น"],
     source: "FC Online Education Hub",
   },
   "mode-start": {
     text: "มือใหม่แนะนำ Kick-Off หรือ Season Mode ก่อน",
-    steps: [
+    keyboardSteps: [
+      "เลือก Kick-Off สำหรับเกมด่วน",
+      "ลอง Season Mode เพื่อความต่อเนื่อง",
+      "หลีกเลี่ยง Rivals จนกว่าจะชำนาญ",
+    ],
+    xboxSteps: [
+      "เลือก Kick-Off สำหรับเกมด่วน",
+      "ลอง Season Mode เพื่อความต่อเนื่อง",
+      "หลีกเลี่ยง Rivals จนกว่าจะชำนาญ",
+    ],
+    playstationSteps: [
       "เลือก Kick-Off สำหรับเกมด่วน",
       "ลอง Season Mode เพื่อความต่อเนื่อง",
       "หลีกเลี่ยง Rivals จนกว่าจะชำนาญ",
@@ -890,32 +973,44 @@ const CANNED: Record<string, CannedAnswer> = {
   },
   passing: {
     text: "มี 3 วิธีส่งบอลหลัก ใช้ให้ถูกสถานการณ์",
-    steps: ["กด A/X ส่งพื้น", "กด Y/△ เปิดสูง", "กด LB/L1 ส่งทะลุช่อง"],
+    keyboardSteps: ["กด S ส่งบอลสั้น", "กด A เปิดบอล", "กด W แทงทะลุช่อง"],
+    xboxSteps: ["กด A ส่งบอลสั้น", "กด X เปิดบอล", "กด Y แทงทะลุช่อง"],
+    playstationSteps: ["กด ✕ ส่งบอลสั้น", "กด □ เปิดบอล", "กด △ แทงทะลุช่อง"],
     source: "FC Online Education Hub",
   },
   dribbling: {
-    text: "เลี้ยงบอลพื้นฐานให้หลุดคูตั้งแต่แรก",
-    steps: ["กด LT/L2 ค้างปกป้องบอล", "เขย่าอนาล็อกซ้ายเพื่อเลี้ยง", "กด B/○ ค้างสำหรับ Sprint"],
+    text: "เลี้ยงบอลพื้นฐานให้หลุดคู่แข่งตั้งแต่แรก",
+    keyboardSteps: ["ใช้ปุ่มทิศทางเพื่อเลี้ยงบอล", "กด C เพื่อบังบอล", "กด E ค้างเพื่อ Sprint"],
+    xboxSteps: ["ใช้อนาล็อกซ้ายเพื่อเลี้ยงบอล", "กด LT เพื่อบังบอล", "กด RT ค้างเพื่อ Sprint"],
+    playstationSteps: ["ใช้อนาล็อกซ้ายเพื่อเลี้ยงบอล", "กด L2 เพื่อบังบอล", "กด R2 ค้างเพื่อ Sprint"],
     source: "FC Online Education Hub",
   },
   shooting: {
     text: "จบสกอร์ง่ายขึ้นด้วยจังหวะและทิศทาง",
-    steps: ["กด B/○ เพื่อยิง", "เล็งด้วยอนาล็อกซ้าย", "ยิงในระยะ 16 หลาเพื่อโอกาสสูงสุด"],
+    keyboardSteps: ["กด D เพื่อยิง", "กดปุ่มทิศทางเพื่อเล็ง", "เริ่มจากแรงยิงประมาณ 1–2 ขีด"],
+    xboxSteps: ["กด B เพื่อยิง", "เล็งด้วยอนาล็อกซ้าย", "เริ่มจากแรงยิงประมาณ 1–2 ขีด"],
+    playstationSteps: ["กด ○ เพื่อยิง", "เล็งด้วยอนาล็อกซ้าย", "เริ่มจากแรงยิงประมาณ 1–2 ขีด"],
     source: "FC Online Education Hub",
   },
   defending: {
     text: "รับให้แน่นด้วย Jockey และเวลาสกัดที่ถูกต้อง",
-    steps: ["กด LT/L2 ค้างเพื่อ Jockey", "กด B/○ เพื่อเข้าสกัด", "กด X/□ เพื่อ Slide Tackle"],
+    keyboardSteps: ["กด C ค้างเพื่อ Jockey", "กด D เพื่อเข้าสกัด", "กด A เพื่อ Slide Tackle"],
+    xboxSteps: ["กด LT ค้างเพื่อ Jockey", "กด B เพื่อเข้าสกัด", "กด X เพื่อ Slide Tackle"],
+    playstationSteps: ["กด L2 ค้างเพื่อ Jockey", "กด ○ เพื่อเข้าสกัด", "กด □ เพื่อ Slide Tackle"],
     source: "FC Online Education Hub",
   },
   qss: {
     text: "QSS คือทีมพร้อมใช้ฟรี ไม่ต้องสร้างเอง",
-    steps: ["เข้าเมนู Quick Squad Select", "เลือกทีมที่ชื่นชอบ", "ลงสนามได้ทันที"],
+    keyboardSteps: ["เข้าเมนู Quick Squad Select", "เลือกทีมที่ชื่นชอบ", "ลงสนามได้ทันที"],
+    xboxSteps: ["เข้าเมนู Quick Squad Select", "เลือกทีมที่ชื่นชอบ", "ลงสนามได้ทันที"],
+    playstationSteps: ["เข้าเมนู Quick Squad Select", "เลือกทีมที่ชื่นชอบ", "ลงสนามได้ทันที"],
     source: "FC Online Education Hub",
   },
   ranking: {
     text: "แนะนำฝึกขั้นพื้นฐานให้ครบก่อน แล้วค่อยลง Ranking",
-    steps: ["ฝึกจนชนะ Kick-Off ได้บ้าง", "ทำความเข้าใจระบบ BP", "เริ่ม Division Rivals เมื่อพร้อม"],
+    keyboardSteps: ["ฝึกจนชนะ Kick-Off ได้บ้าง", "ทำความเข้าใจระบบ BP", "เริ่ม Division Rivals เมื่อพร้อม"],
+    xboxSteps: ["ฝึกจนชนะ Kick-Off ได้บ้าง", "ทำความเข้าใจระบบ BP", "เริ่ม Division Rivals เมื่อพร้อม"],
+    playstationSteps: ["ฝึกจนชนะ Kick-Off ได้บ้าง", "ทำความเข้าใจระบบ BP", "เริ่ม Division Rivals เมื่อพร้อม"],
     source: "FC Online Education Hub",
   },
 };
@@ -925,20 +1020,120 @@ const FALLBACK: CannedAnswer = {
   source: "FC Online Education Hub",
 };
 
-function getCannedAnswer(cannedKey: string, knowledge?: KnowledgeItem): CannedAnswer {
+function createDefaultChatAnswers(): ChatAnswerConfig[] {
+  return KNOWLEDGE.map((item) => {
+    const direct = CANNED[item.id];
+    return {
+      id: item.id,
+      title: item.title,
+      text: direct?.text ?? item.shortSummary,
+      keyboardSteps: direct?.keyboardSteps ?? [],
+      xboxSteps: direct?.xboxSteps ?? [],
+      playstationSteps: direct?.playstationSteps ?? [],
+      source: direct?.source ?? item.source,
+    };
+  });
+}
+
+function mergeChatAnswers(raw: unknown): ChatAnswerConfig[] {
+  const defaults = createDefaultChatAnswers();
+  if (!Array.isArray(raw)) return defaults;
+  return defaults.map((fallback) => {
+    const candidate = raw.find((answer): answer is Record<string, unknown> =>
+      Boolean(answer) && typeof answer === "object" && (answer as Record<string, unknown>).id === fallback.id,
+    );
+    if (!candidate || typeof candidate.text !== "string") return fallback;
+    const stringList = (value: unknown, fallbackValue: string[]) =>
+      Array.isArray(value) && value.every((item) => typeof item === "string") ? value : fallbackValue;
+    return {
+      ...fallback,
+      title: typeof candidate.title === "string" ? candidate.title : fallback.title,
+      text: candidate.text,
+      keyboardSteps: stringList(candidate.keyboardSteps, fallback.keyboardSteps),
+      xboxSteps: stringList(candidate.xboxSteps, fallback.xboxSteps),
+      playstationSteps: stringList(candidate.playstationSteps, fallback.playstationSteps),
+      source: typeof candidate.source === "string" ? candidate.source : fallback.source,
+    };
+  });
+}
+
+function loadChatAnswers(): ChatAnswerConfig[] {
+  try {
+    const raw = window.localStorage.getItem(CHAT_ANSWERS_STORAGE_KEY);
+    return raw ? mergeChatAnswers(JSON.parse(raw)) : createDefaultChatAnswers();
+  } catch {
+    return createDefaultChatAnswers();
+  }
+}
+
+const CHAT_ANSWERS_STORAGE_KEY = "fco-chat-answers-v2";
+const CONTROL_SCHEME_STORAGE_KEY = "fco-control-scheme-v1";
+
+function adaptButtonLabels(value: string, controlScheme: ControlScheme): string {
+  if (controlScheme === "keyboard") return value;
+
+  const replacements: Array<[RegExp, string]> = controlScheme === "xbox"
+    ? [
+        [/\bA\s*\/\s*(?:X|✕)/gi, "A"],
+        [/\bB\s*\/\s*○/gi, "B"],
+        [/\bX\s*\/\s*□/gi, "X"],
+        [/\bY\s*\/\s*△/gi, "Y"],
+        [/\bLT\s*\/\s*L2\b/gi, "LT"],
+        [/\bRT\s*\/\s*R2\b/gi, "RT"],
+        [/\bLB\s*\/\s*L1\b/gi, "LB"],
+        [/\bRB\s*\/\s*R1\b/gi, "RB"],
+      ]
+    : [
+        [/\bA\s*\/\s*(?:X|✕)/gi, "✕"],
+        [/\bB\s*\/\s*○/gi, "○"],
+        [/\bX\s*\/\s*□/gi, "□"],
+        [/\bY\s*\/\s*△/gi, "△"],
+        [/\bLT\s*\/\s*L2\b/gi, "L2"],
+        [/\bRT\s*\/\s*R2\b/gi, "R2"],
+        [/\bLB\s*\/\s*L1\b/gi, "L1"],
+        [/\bRB\s*\/\s*R1\b/gi, "R1"],
+      ];
+
+  return replacements.reduce((result, [pattern, replacement]) => result.replace(pattern, replacement), value);
+}
+
+function getCannedAnswer(
+  cannedKey: string,
+  knowledge: KnowledgeItem | undefined,
+  controlScheme: ControlScheme,
+  answerConfigs: ChatAnswerConfig[],
+): { text: string; steps?: string[]; source?: string } {
+  const configured = answerConfigs.find((answer) => answer.id === cannedKey);
   const direct = CANNED[cannedKey];
   const base: CannedAnswer = direct
     ? direct
     : knowledge
       ? { text: knowledge.shortSummary, source: knowledge.source }
       : FALLBACK;
+  const steps = configured
+    ? controlScheme === "keyboard"
+      ? configured.keyboardSteps
+      : controlScheme === "xbox"
+        ? configured.xboxSteps
+        : configured.playstationSteps
+    : controlScheme === "keyboard"
+      ? base.keyboardSteps
+      : controlScheme === "xbox"
+        ? base.xboxSteps
+        : base.playstationSteps;
+  const safeSteps = steps ?? [];
+  const answer = {
+    text: adaptButtonLabels(configured?.text ?? base.text, controlScheme),
+    steps: safeSteps.length > 0 ? safeSteps.map((step) => adaptButtonLabels(step, controlScheme)) : undefined,
+    source: configured?.source ?? base.source,
+  };
   if (knowledge?.timeSensitive) {
     return {
-      ...base,
-      text: base.text + "\n\nข้อมูลตามช่วงเวลา • ตรวจสอบเวอร์ชันล่าสุดก่อนใช้งาน",
+      ...answer,
+      text: answer.text + "\n\nข้อมูลตามช่วงเวลา • ตรวจสอบเวอร์ชันล่าสุดก่อนใช้งาน",
     };
   }
-  return base;
+  return answer;
 }
 
 // ── Player journey configuration ───────────────────────────────────────────────
@@ -1430,10 +1625,14 @@ function CoachScreen({
   segment,
   onLogout,
   onReportQuestion,
+  answerConfigs,
+  faqConfigs,
 }: {
   segment: Exclude<PlayerSegment, "experienced">;
   onLogout: () => void;
   onReportQuestion: (question: string, recentContext: string) => void;
+  answerConfigs: ChatAnswerConfig[];
+  faqConfigs: FaqConfigItem[];
 }) {
   const [activeTab, setActiveTab] = useState<PlayerTab>("chat");
   const [notifications, setNotifications] = useState<AppNotification[]>(INITIAL_NOTIFICATIONS);
@@ -1446,6 +1645,11 @@ function CoachScreen({
   const [shownTopicIds, setShownTopicIds] = useState<Set<string>>(new Set<string>());
   const [input, setInput] = useState("");
   const [conversationId, setConversationId] = useState<string | undefined>();
+  const [controlScheme, setControlScheme] = useState<ControlScheme>(() => {
+    const saved = window.localStorage.getItem(CONTROL_SCHEME_STORAGE_KEY);
+    if (saved === "keyboard" || saved === "playstation" || saved === "xbox") return saved;
+    return "xbox";
+  });
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const endRef = useRef<HTMLDivElement>(null);
 
@@ -1490,6 +1694,11 @@ function CoachScreen({
     setShownTopicIds((prev) => new Set([...prev, id]));
   }
 
+  function chooseControlScheme(nextScheme: ControlScheme) {
+    setControlScheme(nextScheme);
+    window.localStorage.setItem(CONTROL_SCHEME_STORAGE_KEY, nextScheme);
+  }
+
   function openCompetencePrompt() {
     setJourneyStage("competence");
     append([{ role: "assistant", text: "ตอนนี้อยากพัฒนาเรื่องไหนให้เล่นได้มั่นใจขึ้น?" }]);
@@ -1506,6 +1715,7 @@ function CoachScreen({
     setChipMode(null);
     append([{ role: "user", text: label }]);
     const topic = findKnowledge(topicId);
+    const answer = getCannedAnswer(topicId, topic, controlScheme, answerConfigs);
     const alreadyShown = shownTopicIds.has(topicId);
     botDelay(() => {
       if (!alreadyShown) showTopic(topicId);
@@ -1514,7 +1724,8 @@ function CoachScreen({
           role: "assistant",
           text: alreadyShown
             ? `เราเคยเปิดเรื่อง ${topic?.title ?? label} แล้วครับ ตอนนี้ติดขั้นตอนไหนเป็นพิเศษ?`
-            : topic?.shortSummary ?? "ลองดูเนื้อหานี้ก่อน แล้วบอกผมได้เลยว่ายังติดตรงไหน",
+            : answer.text,
+          steps: alreadyShown ? undefined : answer.steps,
           knowledgeId: alreadyShown ? undefined : topicId,
         },
         { role: "assistant", text: "ดูแล้วเป็นอย่างไรบ้าง?" },
@@ -1582,18 +1793,34 @@ function CoachScreen({
   // ─ Free-text send ─────────────────────────────────────────────────────────
 
   async function answerQuestion(question: string) {
+    if (isMoneyQuestion(question)) {
+      const moneyTopics = ["welcome-pass", "mission-hub"];
+      moneyTopics.forEach(showTopic);
+      setTimeout(() => {
+        setIsTyping(false);
+        append([{
+          role: "assistant",
+          text: "เริ่มจาก Welcome Pass เพื่อรับของเริ่มต้น แล้วเข้า Mission Hub ทำภารกิจและรับรางวัลต่อครับ",
+          relatedIds: moneyTopics,
+        }]);
+      }, 450);
+      return;
+    }
+
     const matched = matchKnowledge(question);
     if (matched) {
       const knowledge = findKnowledge(matched.id);
-      const answer = getCannedAnswer(matched.id, knowledge);
+      const answer = getCannedAnswer(matched.id, knowledge, controlScheme, answerConfigs);
       const alreadyShown = shownTopicIds.has(matched.id);
       if (!alreadyShown) showTopic(matched.id);
       setTimeout(() => {
         setIsTyping(false);
         append([{
           role: "assistant",
-          text: answer.text,
-          steps: answer.steps,
+          text: alreadyShown
+            ? `เราเพิ่งคุยเรื่อง ${knowledge?.title ?? matched.title} ไปแล้วครับ ตอนนี้ติดขั้นตอนไหนเป็นพิเศษ? บอกชื่อปุ่มหรือจังหวะที่งงได้เลย`
+            : answer.text,
+          steps: alreadyShown ? undefined : answer.steps,
           knowledgeId: alreadyShown ? undefined : matched.id,
         }]);
       }, 550);
@@ -1604,7 +1831,15 @@ function CoachScreen({
       const response = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ query: question, conversationId }),
+        body: JSON.stringify({
+          query: question,
+          conversationId,
+          inputMethod: controlScheme,
+          context: messages
+            .filter((message) => message.role === "user" || message.role === "assistant")
+            .slice(-6)
+            .map((message) => ({ role: message.role, text: message.text })),
+        }),
       });
       const result = await response.json();
       if (!response.ok || typeof result.answer !== "string" || !result.answer.trim()) {
@@ -1625,7 +1860,7 @@ function CoachScreen({
         : [];
       append([{
         role: "assistant",
-        text: result.answer.trim(),
+        text: adaptButtonLabels(result.answer.trim(), controlScheme),
         aiSource: "AI-INsea",
         actions,
         reportQuestion: actions.includes("report_question") ? question : undefined,
@@ -1655,21 +1890,42 @@ function CoachScreen({
     void answerQuestion(text);
   }
 
-  function sendFaq(question: string) {
+  function sendFaq(faq: FaqConfigItem) {
     setActiveTab("chat");
     setInput("");
     setChipMode(null);
-    append([{ role: "user", text: question }]);
+    append([{ role: "user", text: faq.question }]);
     setIsTyping(true);
-    void answerQuestion(question);
+    if (isMoneyQuestion(faq.question)) {
+      void answerQuestion(faq.question);
+      return;
+    }
+
+    const primary = KNOWLEDGE.find((item) => item.topicId === faq.topicId);
+    const secondary = faq.secondaryTopicId
+      ? KNOWLEDGE.find((item) => item.topicId === faq.secondaryTopicId)
+      : undefined;
+    if (!primary) {
+      void answerQuestion(faq.question);
+      return;
+    }
+
+    const answer = getCannedAnswer(primary.id, primary, controlScheme, answerConfigs);
+    showTopic(primary.id);
+    if (secondary) showTopic(secondary.id);
+    setTimeout(() => {
+      setIsTyping(false);
+      append([{
+        role: "assistant",
+        text: answer.text,
+        steps: answer.steps,
+        knowledgeId: secondary ? undefined : primary.id,
+        relatedIds: secondary ? [primary.id, secondary.id] : undefined,
+      }]);
+    }, 450);
   }
 
-  const FAQ_CHIPS = [
-    "ส่งบอลยังไง",
-    "เล่นเกมรับยังไง",
-    "ยิงยังไงให้คม",
-    "เชื่อมจอยยังไง",
-  ];
+  const FAQ_CHIPS = faqConfigs.filter((faq) => faq.question.trim().length > 0);
 
   const chipSets: Record<NonNullable<ChipMode>, { label: string; action: () => void }[]> = {
     activation: [
@@ -1746,6 +2002,34 @@ function CoachScreen({
             </span>
             แจ้งเตือน
           </button>
+
+          <div className="mt-4 mx-1 pt-3" style={{ borderTop: "1px solid var(--border)" }}>
+            <p className="px-2 mb-1.5 text-[10px] font-semibold uppercase tracking-wider" style={{ color: "var(--muted-foreground)" }}>
+              วิธีควบคุม
+            </p>
+            {([
+              { id: "keyboard" as ControlScheme, label: "คีย์บอร์ด", icon: <Keyboard size={15} aria-hidden /> },
+              { id: "xbox" as ControlScheme, label: "Xbox · XYAB", icon: <Gamepad2 size={15} aria-hidden /> },
+              { id: "playstation" as ControlScheme, label: "PS · □ △ ○ ✕", icon: <Gamepad2 size={15} aria-hidden /> },
+            ]).map((option) => {
+              const selected = controlScheme === option.id;
+              return (
+                <button
+                  key={option.id}
+                  onClick={() => chooseControlScheme(option.id)}
+                  className="w-full min-h-9 px-2 rounded-md flex items-center gap-2 text-xs font-medium text-left transition-colors"
+                  style={{
+                    color: selected ? "var(--primary)" : "var(--foreground)",
+                    backgroundColor: selected ? "rgba(196,30,30,0.07)" : "transparent",
+                  }}
+                  aria-pressed={selected}
+                >
+                  <span style={{ color: selected ? "var(--primary)" : "var(--muted-foreground)" }}>{option.icon}</span>
+                  {option.label}
+                </button>
+              );
+            })}
+          </div>
         </div>
 
         <div className="px-2">
@@ -1777,6 +2061,19 @@ function CoachScreen({
               ถามเรื่องเกม ทีม และรางวัลได้เลย
             </span>
           </div>
+          <label className="md:hidden ml-auto">
+            <span className="sr-only">วิธีควบคุม</span>
+            <select
+              value={controlScheme}
+              onChange={(event) => chooseControlScheme(event.target.value as ControlScheme)}
+              className="h-8 px-2 rounded-md text-xs outline-none"
+              style={{ border: "1px solid var(--border)", color: "var(--foreground)", backgroundColor: "var(--card)" }}
+            >
+              <option value="keyboard">คีย์บอร์ด</option>
+              <option value="xbox">Xbox · XYAB</option>
+              <option value="playstation">PS · □ △ ○ ✕</option>
+            </select>
+          </label>
         </header>
 
         {/* ── Notification inbox ───────────────────────────────────────────── */}
@@ -2005,16 +2302,16 @@ function CoachScreen({
                     คำถามที่พบบ่อย
                   </span>
                   <div className="flex flex-wrap gap-1.5">
-                    {FAQ_CHIPS.map((q) => (
+                    {FAQ_CHIPS.map((faq) => (
                       <button
-                        key={q}
-                        onClick={() => sendFaq(q)}
+                        key={faq.id}
+                        onClick={() => sendFaq(faq)}
                         className="h-7 px-3 rounded-full text-xs border transition-colors"
                         style={{ borderColor: "var(--border)", color: "var(--muted-foreground)", backgroundColor: "transparent" }}
                         onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = "var(--muted)")}
                         onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = "transparent")}
                       >
-                        {q}
+                        {faq.question}
                       </button>
                     ))}
                   </div>
@@ -2183,13 +2480,103 @@ const INITIAL_REPORTED_QUESTIONS: ReportedQuestion[] = [
   },
 ];
 
-const FAQ_CONFIG = [
-  { question: "ส่งบอลยังไง", stageId: "activation" as JourneyStageId, topicId: "FCO-EDU-043", trigger: "ส่งบอล, จ่ายบอล, passing" },
-  { question: "เล่นเกมรับยังไง", stageId: "competence" as JourneyStageId, topicId: "FCO-EDU-044", trigger: "เกมรับ, ป้องกัน, เข้าสกัด" },
-  { question: "ยิงยังไงให้คม", stageId: "competence" as JourneyStageId, topicId: "FCO-EDU-001", trigger: "ยิง, จบสกอร์, shooting" },
-  { question: "เชื่อมจอยยังไง", stageId: "activation" as JourneyStageId, topicId: "FCO-EDU-030", trigger: "จอย, controller, ตั้งค่าจอย" },
-  { question: "หา BP และรางวัลยังไง", stageId: "next-goal" as JourneyStageId, topicId: "FCO-EDU-018", trigger: "BP, เงิน, รางวัล, ภารกิจ" },
+const FAQ_CONFIG: FaqConfigItem[] = [
+  { id: "faq-money", question: "หาเงินจากไหน", stageId: "next-goal", topicId: "FCO-EDU-007", secondaryTopicId: "FCO-EDU-018", trigger: "หาเงิน, หา BP, เงินไม่พอ, รางวัล" },
+  { id: "faq-passing", question: "ส่งบอลยังไง", stageId: "activation", topicId: "FCO-EDU-043", trigger: "ส่งบอล, จ่ายบอล, passing" },
+  { id: "faq-defending", question: "เล่นเกมรับยังไง", stageId: "competence", topicId: "FCO-EDU-044", trigger: "เกมรับ, ป้องกัน, เข้าสกัด" },
+  { id: "faq-shooting", question: "ยิงยังไงให้คม", stageId: "competence", topicId: "FCO-EDU-001", trigger: "ยิง, จบสกอร์, shooting" },
+  { id: "faq-controller", question: "เชื่อมจอยยังไง", stageId: "activation", topicId: "FCO-EDU-030", trigger: "จอย, controller, ตั้งค่าจอย" },
+  { id: "faq-rewards", question: "หา BP และรางวัลยังไง", stageId: "next-goal", topicId: "FCO-EDU-018", trigger: "BP, เงิน, รางวัล, ภารกิจ" },
 ];
+
+const FAQ_CONFIG_STORAGE_KEY = "fco-faq-config-v1";
+
+function normalizeFaqConfigs(raw: unknown): FaqConfigItem[] {
+  if (!Array.isArray(raw)) return FAQ_CONFIG;
+  const stageIds = new Set<JourneyStageId>(["activation", "competence", "next-goal"]);
+  const topicIds = new Set(KNOWLEDGE.map((item) => item.topicId));
+  return raw.flatMap((item) => {
+    if (!item || typeof item !== "object") return [];
+    const candidate = item as Record<string, unknown>;
+    if (
+      typeof candidate.id !== "string" ||
+      typeof candidate.question !== "string" ||
+      typeof candidate.trigger !== "string" ||
+      typeof candidate.topicId !== "string" ||
+      !topicIds.has(candidate.topicId) ||
+      !stageIds.has(candidate.stageId as JourneyStageId)
+    ) return [];
+    const secondaryTopicId =
+      typeof candidate.secondaryTopicId === "string" && topicIds.has(candidate.secondaryTopicId)
+        ? candidate.secondaryTopicId
+        : undefined;
+    return [{
+      id: candidate.id,
+      question: candidate.question,
+      stageId: candidate.stageId as JourneyStageId,
+      topicId: candidate.topicId,
+      secondaryTopicId,
+      trigger: candidate.trigger,
+    }];
+  });
+}
+
+function normalizeDeliveryPlans(raw: unknown): DailyDeliveryPlan[] {
+  if (!Array.isArray(raw)) return INITIAL_DAILY_DELIVERY_PLANS;
+  const stageIds = new Set<JourneyStageId>(["activation", "competence", "next-goal"]);
+  const channels = new Set<DeliveryChannel>(["notification", "chat"]);
+  const triggers = new Set<DeliveryTrigger>([
+    "segment_selected", "session_start", "after_response", "content_completed", "unresolved_return", "before_handoff",
+  ]);
+  const statuses = new Set<DailyDeliveryPlan["status"]>(["active", "draft"]);
+  const topicIds = new Set(KNOWLEDGE.map((item) => item.topicId));
+  return raw.flatMap((item) => {
+    if (!item || typeof item !== "object") return [];
+    const candidate = item as Record<string, unknown>;
+    const textFields = ["id", "name", "triggerDetail", "message", "nextAction", "successEvent", "fallback"];
+    if (
+      !textFields.every((field) => typeof candidate[field] === "string") ||
+      ![1, 2, 3].includes(candidate.day as number) ||
+      !stageIds.has(candidate.stageId as JourneyStageId) ||
+      !channels.has(candidate.channel as DeliveryChannel) ||
+      !triggers.has(candidate.trigger as DeliveryTrigger) ||
+      !statuses.has(candidate.status as DailyDeliveryPlan["status"]) ||
+      !Array.isArray(candidate.responseOptions) ||
+      !candidate.responseOptions.every((value) => typeof value === "string")
+    ) return [];
+    return [{
+      id: candidate.id as string,
+      day: candidate.day as DeliveryDay,
+      stageId: candidate.stageId as JourneyStageId,
+      name: candidate.name as string,
+      channel: candidate.channel as DeliveryChannel,
+      trigger: candidate.trigger as DeliveryTrigger,
+      triggerDetail: candidate.triggerDetail as string,
+      message: candidate.message as string,
+      contentId: typeof candidate.contentId === "string" && topicIds.has(candidate.contentId) ? candidate.contentId : undefined,
+      responseOptions: candidate.responseOptions as string[],
+      nextAction: candidate.nextAction as string,
+      successEvent: candidate.successEvent as string,
+      fallback: candidate.fallback as string,
+      status: candidate.status as DailyDeliveryPlan["status"],
+    }];
+  });
+}
+
+function parsePublishedSections(raw: unknown): ConfigSection[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.filter((value): value is ConfigSection => value === "faq_content" || value === "proactive_messages");
+}
+
+function loadFaqConfigs(): FaqConfigItem[] {
+  try {
+    const raw = window.localStorage.getItem(FAQ_CONFIG_STORAGE_KEY);
+    if (!raw) return FAQ_CONFIG;
+    return normalizeFaqConfigs(JSON.parse(raw));
+  } catch {
+    return FAQ_CONFIG;
+  }
+}
 
 function AdminOverview({ plans, reportedQuestions }: { plans: DailyDeliveryPlan[]; reportedQuestions: ReportedQuestion[] }) {
   const activeMessages = plans.filter((p) => p.status === "active").length;
@@ -2259,18 +2646,48 @@ function AdminOverview({ plans, reportedQuestions }: { plans: DailyDeliveryPlan[
 
 // ── AdminProactiveMessages ─────────────────────────────────────────────────────
 
+function SaveChangesButton({
+  state,
+  onClick,
+  disabled,
+}: {
+  state: SaveState;
+  onClick: () => void;
+  disabled?: boolean;
+}) {
+  const label = state === "saving" ? "กำลังบันทึก..." : state === "saved" ? "บันทึกแล้ว" : "Save changes";
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled || state === "saving"}
+      className="h-9 px-3 rounded-lg text-xs font-semibold shrink-0 transition-opacity disabled:opacity-45"
+      style={{ backgroundColor: "var(--primary)", color: "var(--primary-foreground)" }}
+    >
+      {label}
+    </button>
+  );
+}
+
 function AdminProactiveMessages({
   plans,
   setPlans,
+  onSave,
+  configStatus,
 }: {
   plans: DailyDeliveryPlan[];
   setPlans: (fn: (prev: DailyDeliveryPlan[]) => DailyDeliveryPlan[]) => void;
+  onSave: (plans: DailyDeliveryPlan[]) => Promise<void>;
+  configStatus: SharedConfigStatus;
 }) {
   const [stageFilter, setStageFilter] = useState<JourneyStageId | "all">("all");
   const [editingId, setEditingId] = useState<string | null>(null);
+  const [saveState, setSaveState] = useState<SaveState>("idle");
+  const [saveError, setSaveError] = useState("");
 
   function patch(id: string, update: Partial<DailyDeliveryPlan>) {
     setPlans((prev) => prev.map((p) => (p.id === id ? { ...p, ...update } : p)));
+    setSaveState("idle");
   }
 
   const visiblePlans = stageFilter === "all" ? plans : plans.filter((p) => p.stageId === stageFilter);
@@ -2286,6 +2703,18 @@ function AdminProactiveMessages({
     before_handoff: "Before handoff",
   };
 
+  async function saveChanges() {
+    setSaveState("saving");
+    setSaveError("");
+    try {
+      await onSave(plans);
+      setSaveState("saved");
+    } catch (error) {
+      setSaveState("error");
+      setSaveError(error instanceof Error ? error.message : "ไม่สามารถบันทึกการเปลี่ยนแปลงได้");
+    }
+  }
+
   return (
     <div className="flex-1 overflow-y-auto p-6 flex flex-col gap-5 max-w-5xl">
       <div className="flex items-start justify-between gap-4">
@@ -2295,24 +2724,35 @@ function AdminProactiveMessages({
             Bot-initiated messages driven by player behavior, not a once-per-day schedule
           </p>
         </div>
-        <button
-          className="h-9 px-4 rounded-lg text-xs font-semibold"
-          style={{ backgroundColor: "var(--primary)", color: "var(--primary-foreground)" }}
-          onClick={() => {
-            const stage = stageFilter === "all" ? "activation" : stageFilter;
-            const day = JOURNEY_STAGES.find((s) => s.id === stage)?.day ?? 1;
-            const id = uid();
-            setPlans((prev) => [...prev, {
-              id, day, stageId: stage, name: "New proactive message", channel: "chat", trigger: "after_response",
-              triggerDetail: "กำหนดเงื่อนไขการส่ง", message: "", responseOptions: [], nextAction: "",
-              successEvent: "", fallback: "เปิดช่องพิมพ์คำถาม", status: "draft",
-            }]);
-            setEditingId(id);
-          }}
-        >
-          + เพิ่มข้อความ
-        </button>
+        <div className="flex items-center gap-2">
+          <SaveChangesButton state={saveState} onClick={saveChanges} disabled={configStatus !== "ready"} />
+          <button
+            className="h-9 px-4 rounded-lg text-xs font-semibold"
+            style={{ backgroundColor: "var(--muted)", color: "var(--foreground)" }}
+            onClick={() => {
+              const stage = stageFilter === "all" ? "activation" : stageFilter;
+              const day = JOURNEY_STAGES.find((s) => s.id === stage)?.day ?? 1;
+              const id = uid();
+              setPlans((prev) => [...prev, {
+                id, day, stageId: stage, name: "New proactive message", channel: "chat", trigger: "after_response",
+                triggerDetail: "กำหนดเงื่อนไขการส่ง", message: "", responseOptions: [], nextAction: "",
+                successEvent: "", fallback: "เปิดช่องพิมพ์คำถาม", status: "draft",
+              }]);
+              setEditingId(id);
+              setSaveState("idle");
+            }}
+          >
+            + เพิ่มข้อความ
+          </button>
+        </div>
       </div>
+
+      {configStatus !== "ready" && (
+        <p className="text-xs" style={{ color: "var(--primary)" }}>
+          {configStatus === "loading" ? "กำลังเชื่อม shared storage..." : "ยังไม่ได้เชื่อม shared storage · การแก้ไขจะอยู่ใน browser นี้เท่านั้น"}
+        </p>
+      )}
+      {saveError && <p className="text-xs" style={{ color: "var(--primary)" }}>{saveError}</p>}
 
       <div className="flex flex-wrap gap-2">
         {(["all", "activation", "competence", "next-goal"] as const).map((value) => (
@@ -2479,7 +2919,7 @@ function AdminProactiveMessages({
                         onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = "var(--muted)")}
                         onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = "transparent")}
                       >
-                        บันทึกแบบร่าง
+                        ตั้งเป็น Draft
                       </button>
                       <button
                         onClick={() => { patch(plan.id, { status: "active" }); setEditingId(null); }}
@@ -2505,7 +2945,7 @@ function AdminProactiveMessages({
       </div>
 
       <p className="text-[10px]" style={{ color: "var(--muted-foreground)" }}>
-        MVP ใช้ local mock · Supabase publish/version history ยังพักไว้ตาม scope ปัจจุบัน
+        กด Save changes เพื่อเผยแพร่ข้อความให้ผู้เล่นเห็นหลังโหลดหน้าใหม่
       </p>
     </div>
   );
@@ -2513,10 +2953,25 @@ function AdminProactiveMessages({
 
 // ── AdminContentLibrary ────────────────────────────────────────────────────────
 
-function AdminContentLibrary() {
+function AdminContentLibrary({
+  answerConfigs,
+  setAnswerConfigs,
+  faqConfigs,
+  setFaqConfigs,
+  onSave,
+  configStatus,
+}: {
+  answerConfigs: ChatAnswerConfig[];
+  setAnswerConfigs: React.Dispatch<React.SetStateAction<ChatAnswerConfig[]>>;
+  faqConfigs: FaqConfigItem[];
+  setFaqConfigs: React.Dispatch<React.SetStateAction<FaqConfigItem[]>>;
+  onSave: (payload: { faqConfigs: FaqConfigItem[]; answerConfigs: ChatAnswerConfig[] }) => Promise<void>;
+  configStatus: SharedConfigStatus;
+}) {
   const [search, setSearch] = useState("");
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [faqs, setFaqs] = useState(FAQ_CONFIG);
+  const [saveState, setSaveState] = useState<SaveState>("idle");
+  const [saveError, setSaveError] = useState("");
 
   const filtered = KNOWLEDGE.filter(
     (k) =>
@@ -2526,43 +2981,152 @@ function AdminContentLibrary() {
   );
 
   const selected = selectedId ? KNOWLEDGE.find((k) => k.id === selectedId) : null;
+  const selectedAnswer = selected ? answerConfigs.find((answer) => answer.id === selected.id) : null;
+
+  function patchAnswer(id: string, update: Partial<ChatAnswerConfig>) {
+    setAnswerConfigs((prev) => prev.map((answer) => answer.id === id ? { ...answer, ...update } : answer));
+    setSaveState("idle");
+  }
+
+  function patchFaq(id: string, update: Partial<FaqConfigItem>) {
+    setFaqConfigs((prev) => prev.map((faq) => faq.id === id ? { ...faq, ...update } : faq));
+    setSaveState("idle");
+  }
+
+  async function saveChanges() {
+    setSaveState("saving");
+    setSaveError("");
+    try {
+      await onSave({ faqConfigs, answerConfigs });
+      setSaveState("saved");
+    } catch (error) {
+      setSaveState("error");
+      setSaveError(error instanceof Error ? error.message : "ไม่สามารถบันทึกการเปลี่ยนแปลงได้");
+    }
+  }
 
   return (
     <div className="flex-1 overflow-hidden flex">
       {/* Table pane */}
       <div className="flex flex-col overflow-hidden" style={{ width: selected ? "55%" : "100%" }}>
         <div className="px-5 pt-5 pb-3 shrink-0 flex flex-col gap-4">
-          <div>
-            <h2 className="text-base font-semibold" style={{ color: "var(--foreground)" }}>FAQ &amp; Content</h2>
-            <p className="text-xs mt-1" style={{ color: "var(--muted-foreground)" }}>Set common questions and link every answer to a verified knowledge topic</p>
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <h2 className="text-base font-semibold" style={{ color: "var(--foreground)" }}>FAQ &amp; Content</h2>
+              <p className="text-xs mt-1" style={{ color: "var(--muted-foreground)" }}>เพิ่ม แก้ หรือลบ FAQ และคำตอบที่เชื่อมกับฐานข้อมูล</p>
+            </div>
+            <div className="flex items-center gap-2">
+              <SaveChangesButton state={saveState} onClick={saveChanges} disabled={configStatus !== "ready"} />
+              <button
+                onClick={() => {
+                  setFaqConfigs((prev) => [...prev, {
+                    id: `faq-${uid()}`,
+                    question: "คำถามใหม่",
+                    stageId: "activation",
+                    topicId: KNOWLEDGE[0].topicId,
+                    trigger: "",
+                  }]);
+                  setSaveState("idle");
+                }}
+                className="h-9 px-3 rounded-lg text-xs font-semibold shrink-0"
+                style={{ backgroundColor: "var(--muted)", color: "var(--foreground)" }}
+              >
+                + เพิ่ม FAQ
+              </button>
+            </div>
           </div>
 
+          {configStatus !== "ready" && (
+            <p className="text-xs" style={{ color: "var(--primary)" }}>
+              {configStatus === "loading" ? "กำลังเชื่อม shared storage..." : "ยังไม่ได้เชื่อม shared storage · การแก้ไขจะอยู่ใน browser นี้เท่านั้น"}
+            </p>
+          )}
+          {saveError && <p className="text-xs" style={{ color: "var(--primary)" }}>{saveError}</p>}
+
           <div className="grid md:grid-cols-2 gap-2">
-            {faqs.map((faq, index) => {
+            {faqConfigs.map((faq) => {
               const topic = KNOWLEDGE.find((k) => k.topicId === faq.topicId);
+              const secondaryTopic = faq.secondaryTopicId ? KNOWLEDGE.find((k) => k.topicId === faq.secondaryTopicId) : undefined;
               return (
-                <div key={`${faq.question}-${index}`} className="rounded-lg border p-3" style={{ borderColor: "var(--border)", backgroundColor: "var(--card)" }}>
+                <div key={faq.id} className="rounded-lg border p-3" style={{ borderColor: "var(--border)", backgroundColor: "var(--card)" }}>
                   <div className="flex items-start gap-2">
                     <input
                       value={faq.question}
-                      onChange={(e) => setFaqs((prev) => prev.map((item, i) => i === index ? { ...item, question: e.target.value } : item))}
+                      onChange={(e) => patchFaq(faq.id, { question: e.target.value })}
+                      aria-label="คำถาม FAQ"
                       className="flex-1 bg-transparent text-xs font-semibold outline-none min-w-0"
                       style={{ color: "var(--foreground)" }}
                     />
-                    <span className="text-[10px] px-2 py-0.5 rounded-full shrink-0" style={{ backgroundColor: "var(--muted)", color: "var(--muted-foreground)" }}>
-                      {JOURNEY_STAGES.find((s) => s.id === faq.stageId)?.title}
-                    </span>
+                    <button
+                      onClick={() => { setFaqConfigs((prev) => prev.filter((item) => item.id !== faq.id)); setSaveState("idle"); }}
+                      className="text-[11px] px-2 py-0.5 rounded-md shrink-0 transition-opacity hover:opacity-60"
+                      style={{ color: "var(--primary)", backgroundColor: "rgba(196,30,30,0.06)" }}
+                      aria-label={`ลบ FAQ ${faq.question}`}
+                    >
+                      ลบ
+                    </button>
+                  </div>
+                  <div className="grid grid-cols-2 gap-1.5 mt-2">
+                    <select
+                      value={faq.stageId}
+                      onChange={(e) => patchFaq(faq.id, { stageId: e.target.value as JourneyStageId })}
+                      aria-label={`${faq.question} Journey stage`}
+                      className="h-8 px-2 rounded-md text-[11px]"
+                      style={{ border: "1px solid var(--border)", backgroundColor: "var(--background)", color: "var(--foreground)" }}
+                    >
+                      {JOURNEY_STAGES.map((stage) => <option key={stage.id} value={stage.id}>{stage.title}</option>)}
+                    </select>
+                    <input
+                      value={faq.trigger}
+                      onChange={(e) => patchFaq(faq.id, { trigger: e.target.value })}
+                      aria-label={`${faq.question} keywords`}
+                      placeholder="keywords คั่นด้วย ,"
+                      className="h-8 px-2 rounded-md text-[11px] outline-none"
+                      style={{ border: "1px solid var(--border)", backgroundColor: "var(--background)", color: "var(--foreground)" }}
+                    />
                   </div>
                   <select
                     value={faq.topicId}
-                    onChange={(e) => setFaqs((prev) => prev.map((item, i) => i === index ? { ...item, topicId: e.target.value } : item))}
-                    className="w-full mt-2 h-8 px-2 rounded-md text-[11px]"
+                    onChange={(e) => patchFaq(faq.id, { topicId: e.target.value })}
+                    aria-label={`${faq.question} เนื้อหาหลัก`}
+                    className="w-full mt-1.5 h-8 px-2 rounded-md text-[11px]"
                     style={{ border: "1px solid var(--border)", backgroundColor: "var(--background)", color: "var(--foreground)" }}
                   >
                     {KNOWLEDGE.map((k) => <option key={k.topicId} value={k.topicId}>{k.topicId} · {k.title}</option>)}
                   </select>
-                  <p className="text-[10px] mt-1 truncate" style={{ color: "var(--muted-foreground)" }}>{faq.trigger}</p>
-                  {topic ? <p className="text-[10px] mt-1 truncate" style={{ color: "var(--primary)" }}>{topic.title}</p> : null}
+                  {faq.secondaryTopicId !== undefined && (
+                    <select
+                      value={faq.secondaryTopicId}
+                      onChange={(e) => patchFaq(faq.id, { secondaryTopicId: e.target.value })}
+                      aria-label={`${faq.question} เนื้อหาที่สอง`}
+                      className="w-full mt-1.5 h-8 px-2 rounded-md text-[11px]"
+                      style={{ border: "1px solid var(--border)", backgroundColor: "var(--background)", color: "var(--foreground)" }}
+                    >
+                      {KNOWLEDGE.map((k) => <option key={k.topicId} value={k.topicId}>{k.topicId} · {k.title}</option>)}
+                    </select>
+                  )}
+                  <div className="flex items-center justify-between gap-2 mt-1.5">
+                    {faq.secondaryTopicId === undefined ? (
+                      <button
+                        onClick={() => patchFaq(faq.id, { secondaryTopicId: KNOWLEDGE[1]?.topicId ?? KNOWLEDGE[0].topicId })}
+                        className="text-[10px] transition-opacity hover:opacity-60"
+                        style={{ color: "var(--muted-foreground)" }}
+                      >
+                        + เพิ่ม content ที่สอง
+                      </button>
+                    ) : (
+                      <button
+                        onClick={() => patchFaq(faq.id, { secondaryTopicId: undefined })}
+                        className="text-[10px] transition-opacity hover:opacity-60"
+                        style={{ color: "var(--muted-foreground)" }}
+                      >
+                        เอา content ที่สองออก
+                      </button>
+                    )}
+                  </div>
+                  {topic ? <p className="text-[10px] mt-1 truncate" style={{ color: "var(--primary)" }}>
+                    {topic.title}{secondaryTopic ? ` + ${secondaryTopic.title}` : ""}
+                  </p> : null}
                 </div>
               );
             })}
@@ -2652,6 +3216,60 @@ function AdminContentLibrary() {
           <p className="text-xs leading-relaxed" style={{ color: "var(--foreground)" }}>
             {selected.shortSummary}
           </p>
+
+          {selectedAnswer && (
+            <section className="rounded-lg border p-4 flex flex-col gap-3" style={{ borderColor: "var(--border)", backgroundColor: "var(--background)" }}>
+              <div>
+                <h4 className="text-xs font-semibold" style={{ color: "var(--foreground)" }}>คำตอบในแชท</h4>
+                <p className="text-[10px] mt-0.5" style={{ color: "var(--muted-foreground)" }}>
+                  กด Save changes เพื่อเผยแพร่คำตอบนี้ให้ผู้เล่นเห็น
+                </p>
+              </div>
+              <label className="flex flex-col gap-1 text-[11px] font-medium" style={{ color: "var(--muted-foreground)" }}>
+                ข้อความนำ
+                <textarea
+                  value={selectedAnswer.text}
+                  onChange={(event) => { patchAnswer(selectedAnswer.id, { text: event.target.value }); setSaveState("idle"); }}
+                  rows={3}
+                  className="rounded-md px-3 py-2 text-xs font-normal resize-y outline-none"
+                  style={{ border: "1px solid var(--border)", backgroundColor: "var(--card)", color: "var(--foreground)" }}
+                />
+              </label>
+              <label className="flex flex-col gap-1 text-[11px] font-medium" style={{ color: "var(--muted-foreground)" }}>
+                ขั้นตอนสำหรับคีย์บอร์ด · 1 บรรทัดต่อ 1 ข้อ
+                <textarea
+                  value={selectedAnswer.keyboardSteps.join("\n")}
+                  onChange={(event) => { patchAnswer(selectedAnswer.id, { keyboardSteps: event.target.value.split("\n").filter(Boolean) }); setSaveState("idle"); }}
+                  rows={3}
+                  placeholder="เช่น กด S เพื่อส่งบอลสั้น"
+                  className="rounded-md px-3 py-2 text-xs font-normal resize-y outline-none"
+                  style={{ border: "1px solid var(--border)", backgroundColor: "var(--card)", color: "var(--foreground)" }}
+                />
+              </label>
+              <label className="flex flex-col gap-1 text-[11px] font-medium" style={{ color: "var(--muted-foreground)" }}>
+                ขั้นตอนสำหรับ Xbox · ใช้ XYAB
+                <textarea
+                  value={selectedAnswer.xboxSteps.join("\n")}
+                  onChange={(event) => { patchAnswer(selectedAnswer.id, { xboxSteps: event.target.value.split("\n").filter(Boolean) }); setSaveState("idle"); }}
+                  rows={3}
+                  placeholder="เช่น กด A เพื่อส่งบอลสั้น"
+                  className="rounded-md px-3 py-2 text-xs font-normal resize-y outline-none"
+                  style={{ border: "1px solid var(--border)", backgroundColor: "var(--card)", color: "var(--foreground)" }}
+                />
+              </label>
+              <label className="flex flex-col gap-1 text-[11px] font-medium" style={{ color: "var(--muted-foreground)" }}>
+                ขั้นตอนสำหรับ PlayStation · ใช้ □ △ ○ ✕
+                <textarea
+                  value={selectedAnswer.playstationSteps.join("\n")}
+                  onChange={(event) => { patchAnswer(selectedAnswer.id, { playstationSteps: event.target.value.split("\n").filter(Boolean) }); setSaveState("idle"); }}
+                  rows={3}
+                  placeholder="เช่น กด ✕ เพื่อส่งบอลสั้น"
+                  className="rounded-md px-3 py-2 text-xs font-normal resize-y outline-none"
+                  style={{ border: "1px solid var(--border)", backgroundColor: "var(--card)", color: "var(--foreground)" }}
+                />
+              </label>
+            </section>
+          )}
 
           {selected.timeSensitive && (
             <p className="text-xs px-2.5 py-1.5 rounded-md"
@@ -2940,7 +3558,7 @@ function AdminContentFlows({
 
 // ── AdminPreview ───────────────────────────────────────────────────────────────
 
-const PREVIEW_FAQ = ["ส่งบอลยังไง", "เล่นเกมรับยังไง", "ยิงยังไงให้คม", "เชื่อมจอยยังไง"];
+const PREVIEW_FAQ = ["หาเงินจากไหน", "ส่งบอลยังไง", "เล่นเกมรับยังไง", "ยิงยังไงให้คม", "เชื่อมจอยยังไง"];
 
 function AdminPreview({ deliveryPlans }: { deliveryPlans: DailyDeliveryPlan[] }) {
   const [previewDay, setPreviewDay] = useState<DeliveryDay>(1);
@@ -3175,16 +3793,37 @@ const STATUS_COLORS: Record<ReportedQuestion["status"], { bg: string; color: str
 function AdminUnansweredQuestions({
   questions,
   setQuestions,
+  onSave,
+  configStatus,
 }: {
   questions: ReportedQuestion[];
   setQuestions: (fn: (prev: ReportedQuestion[]) => ReportedQuestion[]) => void;
+  onSave: (question: ReportedQuestion) => Promise<ReportedQuestion>;
+  configStatus: SharedConfigStatus;
 }) {
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [saveState, setSaveState] = useState<SaveState>("idle");
+  const [saveError, setSaveError] = useState("");
 
   const selected = selectedId ? questions.find((q) => q.id === selectedId) ?? null : null;
 
   function patchQuestion(id: string, update: Partial<ReportedQuestion>) {
     setQuestions((prev) => prev.map((q) => (q.id === id ? { ...q, ...update } : q)));
+    setSaveState("idle");
+  }
+
+  async function saveChanges() {
+    if (!selected) return;
+    setSaveState("saving");
+    setSaveError("");
+    try {
+      const saved = await onSave(selected);
+      setQuestions((prev) => prev.map((question) => question.id === saved.id ? saved : question));
+      setSaveState("saved");
+    } catch (error) {
+      setSaveState("error");
+      setSaveError(error instanceof Error ? error.message : "ไม่สามารถบันทึกการเปลี่ยนแปลงได้");
+    }
   }
 
   const inputStyle = {
@@ -3202,18 +3841,28 @@ function AdminUnansweredQuestions({
         style={{ width: selected ? "55%" : "100%" }}
       >
         {/* Header */}
-        <div className="px-5 pt-5 pb-3 shrink-0 flex items-center justify-between">
+        <div className="px-5 pt-5 pb-3 shrink-0 flex items-center justify-between gap-3">
           <div>
             <h2 className="text-base font-semibold" style={{ color: "var(--foreground)" }}>Unanswered Questions</h2>
             <p className="text-xs mt-0.5" style={{ color: "var(--muted-foreground)" }}>
               คำถามที่ยังไม่มีในฐานความรู้ · จาก player report
             </p>
           </div>
-          <span className="text-xs px-2 py-0.5 rounded-full font-semibold"
-            style={{ backgroundColor: "rgba(196,30,30,0.08)", color: "var(--primary)" }}>
-            {questions.filter((q) => q.status === "new").length} new
-          </span>
+          <div className="flex items-center gap-2">
+            <SaveChangesButton state={saveState} onClick={saveChanges} disabled={configStatus !== "ready" || !selected} />
+            <span className="text-xs px-2 py-0.5 rounded-full font-semibold"
+              style={{ backgroundColor: "rgba(196,30,30,0.08)", color: "var(--primary)" }}>
+              {questions.filter((q) => q.status === "new").length} new
+            </span>
+          </div>
         </div>
+
+        {configStatus !== "ready" && (
+          <p className="px-5 pb-3 text-xs" style={{ color: "var(--primary)" }}>
+            {configStatus === "loading" ? "กำลังเชื่อม shared storage..." : "ยังไม่ได้เชื่อม shared storage · การแก้ไขจะอยู่ใน browser นี้เท่านั้น"}
+          </p>
+        )}
+        {saveError && <p className="px-5 pb-3 text-xs" style={{ color: "var(--primary)" }}>{saveError}</p>}
 
         {/* Column headers */}
         <div
@@ -3413,19 +4062,172 @@ function AdminUnansweredQuestions({
   );
 }
 
+// ── AdminVersionHistory ───────────────────────────────────────────────────────
+
+function AdminVersionHistory({
+  configRevision,
+  configStatus,
+  onRestore,
+}: {
+  configRevision: number;
+  configStatus: SharedConfigStatus;
+  onRestore: (revision: number) => Promise<void>;
+}) {
+  const [versions, setVersions] = useState<ConfigVersion[]>([]);
+  const [loadState, setLoadState] = useState<"idle" | "loading" | "error">("idle");
+  const [restoreState, setRestoreState] = useState<SaveState>("idle");
+  const [message, setMessage] = useState("");
+
+  async function loadVersions() {
+    if (configStatus !== "ready") return;
+    setLoadState("loading");
+    setMessage("");
+    try {
+      const response = await fetch("/api/admin/config/versions", { cache: "no-store" });
+      const raw = await response.json().catch(() => ({})) as Record<string, unknown>;
+      if (!response.ok || !Array.isArray(raw.versions)) throw new Error(typeof raw.error === "string" ? raw.error : "ไม่สามารถโหลดประวัติเวอร์ชันได้");
+      const parsed = raw.versions.flatMap((item): ConfigVersion[] => {
+        if (!item || typeof item !== "object") return [];
+        const version = item as Record<string, unknown>;
+        if (
+          typeof version.id !== "string" ||
+          !Number.isInteger(version.revision) ||
+          typeof version.changed_section !== "string" ||
+          typeof version.created_at !== "string" ||
+          typeof version.created_by !== "string"
+        ) return [];
+        return [{
+          id: version.id,
+          revision: version.revision as number,
+          changedSection: version.changed_section,
+          createdAt: version.created_at,
+          createdBy: version.created_by,
+        }];
+      });
+      setVersions(parsed);
+      setLoadState("idle");
+    } catch (error) {
+      setLoadState("error");
+      setMessage(error instanceof Error ? error.message : "ไม่สามารถโหลดประวัติเวอร์ชันได้");
+    }
+  }
+
+  useEffect(() => { void loadVersions(); }, [configStatus]);
+
+  async function restoreVersion(version: ConfigVersion) {
+    if (!window.confirm(`ย้อนกลับไป Version ${version.revision}? การเปลี่ยนแปลงปัจจุบันจะถูกเก็บเป็น version ใหม่`)) return;
+    setRestoreState("saving");
+    setMessage("");
+    try {
+      await onRestore(version.revision);
+      setRestoreState("saved");
+      setMessage(`คืนค่า Version ${version.revision} แล้ว`);
+      await loadVersions();
+    } catch (error) {
+      setRestoreState("error");
+      setMessage(error instanceof Error ? error.message : "ไม่สามารถคืนค่า version ได้");
+    }
+  }
+
+  const sectionLabel = (value: string) => {
+    if (value === "faq_content") return "FAQ & Content";
+    if (value === "proactive_messages") return "Proactive Messages";
+    if (value === "initial") return "Initial configuration";
+    if (value.startsWith("rollback:")) return `Rollback from Version ${value.replace("rollback:", "")}`;
+    return value;
+  };
+
+  return (
+    <div className="flex-1 overflow-y-auto p-6 max-w-4xl">
+      <div className="flex items-start justify-between gap-4 mb-5">
+        <div>
+          <h2 className="text-base font-semibold" style={{ color: "var(--foreground)" }}>Version History</h2>
+          <p className="text-xs mt-1" style={{ color: "var(--muted-foreground)" }}>เผยแพร่แต่ละครั้งจะเก็บ snapshot และคืนค่าได้</p>
+        </div>
+        <button
+          onClick={() => void loadVersions()}
+          disabled={configStatus !== "ready" || loadState === "loading"}
+          className="h-9 px-3 rounded-lg text-xs font-semibold border disabled:opacity-45"
+          style={{ borderColor: "var(--border)", color: "var(--foreground)", backgroundColor: "var(--card)" }}
+        >
+          {loadState === "loading" ? "กำลังโหลด..." : "รีเฟรช"}
+        </button>
+      </div>
+
+      {configStatus !== "ready" ? (
+        <p className="text-sm" style={{ color: "var(--primary)" }}>
+          {configStatus === "loading" ? "กำลังเชื่อม shared storage..." : "Version history จะพร้อมหลังตั้งค่า Supabase บน deployment"}
+        </p>
+      ) : (
+        <div className="rounded-xl border overflow-hidden" style={{ borderColor: "var(--border)" }}>
+          <div className="px-4 py-3 text-xs" style={{ backgroundColor: "var(--muted)", color: "var(--muted-foreground)" }}>
+            Current version: <span className="font-semibold" style={{ color: "var(--foreground)" }}>{configRevision}</span>
+          </div>
+          {versions.length === 0 && loadState !== "loading" && (
+            <p className="px-4 py-5 text-sm" style={{ color: "var(--muted-foreground)" }}>ยังไม่มีประวัติการเผยแพร่</p>
+          )}
+          {versions.map((version) => (
+            <div key={version.id} className="flex items-center gap-4 px-4 py-3" style={{ borderTop: "1px solid var(--border)" }}>
+              <span className="text-xs font-bold shrink-0" style={{ color: version.revision === configRevision ? "var(--primary)" : "var(--foreground)" }}>v{version.revision}</span>
+              <div className="min-w-0 flex-1">
+                <p className="text-xs font-medium truncate" style={{ color: "var(--foreground)" }}>{sectionLabel(version.changedSection)}</p>
+                <p className="text-[10px] mt-0.5" style={{ color: "var(--muted-foreground)" }}>
+                  {new Date(version.createdAt).toLocaleString("th-TH")} · {version.createdBy}
+                </p>
+              </div>
+              <button
+                onClick={() => void restoreVersion(version)}
+                disabled={version.revision === configRevision || restoreState === "saving"}
+                className="h-8 px-3 rounded-lg text-xs font-semibold border disabled:opacity-40"
+                style={{ borderColor: "var(--border)", color: "var(--foreground)", backgroundColor: "var(--card)" }}
+              >
+                คืนค่านี้
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+      {message && <p className="mt-3 text-xs" style={{ color: restoreState === "error" || loadState === "error" ? "var(--primary)" : "var(--accent)" }}>{message}</p>}
+    </div>
+  );
+}
+
 // ── AdminView ──────────────────────────────────────────────────────────────────
 
 function AdminView({
   onLogout,
   reportedQuestions,
   setReportedQuestions,
+  answerConfigs,
+  setAnswerConfigs,
+  faqConfigs,
+  setFaqConfigs,
+  deliveryPlans,
+  setDeliveryPlans,
+  onSaveFaqContent,
+  onSaveProactiveMessages,
+  onSaveUnansweredQuestion,
+  onRestoreConfigVersion,
+  configRevision,
+  configStatus,
 }: {
   onLogout: () => void;
   reportedQuestions: ReportedQuestion[];
   setReportedQuestions: (fn: (prev: ReportedQuestion[]) => ReportedQuestion[]) => void;
+  answerConfigs: ChatAnswerConfig[];
+  setAnswerConfigs: React.Dispatch<React.SetStateAction<ChatAnswerConfig[]>>;
+  faqConfigs: FaqConfigItem[];
+  setFaqConfigs: React.Dispatch<React.SetStateAction<FaqConfigItem[]>>;
+  deliveryPlans: DailyDeliveryPlan[];
+  setDeliveryPlans: React.Dispatch<React.SetStateAction<DailyDeliveryPlan[]>>;
+  onSaveFaqContent: (payload: { faqConfigs: FaqConfigItem[]; answerConfigs: ChatAnswerConfig[] }) => Promise<void>;
+  onSaveProactiveMessages: (plans: DailyDeliveryPlan[]) => Promise<void>;
+  onSaveUnansweredQuestion: (question: ReportedQuestion) => Promise<ReportedQuestion>;
+  onRestoreConfigVersion: (revision: number) => Promise<void>;
+  configRevision: number;
+  configStatus: SharedConfigStatus;
 }) {
   const [tab, setTab] = useState<AdminTab>("overview");
-  const [deliveryPlans, setDeliveryPlans] = useState<DailyDeliveryPlan[]>(INITIAL_DAILY_DELIVERY_PLANS);
 
   const newCount = reportedQuestions.filter((q) => q.status === "new").length;
 
@@ -3435,6 +4237,7 @@ function AdminView({
     { key: "faq-content", label: "FAQ & Content", icon: <BookOpen size={15} aria-hidden /> },
     { key: "unanswered", label: "Unanswered Questions", icon: <Search size={15} aria-hidden />, badge: newCount },
     { key: "preview", label: "Preview", icon: <GitBranch size={15} aria-hidden /> },
+    { key: "history", label: "Version History", icon: <History size={15} aria-hidden /> },
   ];
 
   return (
@@ -3494,19 +4297,72 @@ function AdminView({
       {/* Content area */}
       <main className="flex-1 overflow-hidden flex">
         {tab === "overview" && <AdminOverview plans={deliveryPlans} reportedQuestions={reportedQuestions} />}
-        {tab === "proactive-messages" && <AdminProactiveMessages plans={deliveryPlans} setPlans={setDeliveryPlans} />}
-        {tab === "faq-content" && <AdminContentLibrary />}
-        {tab === "unanswered" && <AdminUnansweredQuestions questions={reportedQuestions} setQuestions={setReportedQuestions} />}
+        {tab === "proactive-messages" && (
+          <AdminProactiveMessages
+            plans={deliveryPlans}
+            setPlans={setDeliveryPlans}
+            onSave={onSaveProactiveMessages}
+            configStatus={configStatus}
+          />
+        )}
+        {tab === "faq-content" && (
+          <AdminContentLibrary
+            answerConfigs={answerConfigs}
+            setAnswerConfigs={setAnswerConfigs}
+            faqConfigs={faqConfigs}
+            setFaqConfigs={setFaqConfigs}
+            onSave={onSaveFaqContent}
+            configStatus={configStatus}
+          />
+        )}
+        {tab === "unanswered" && (
+          <AdminUnansweredQuestions
+            questions={reportedQuestions}
+            setQuestions={setReportedQuestions}
+            onSave={onSaveUnansweredQuestion}
+            configStatus={configStatus}
+          />
+        )}
         {tab === "preview" && <AdminPreview deliveryPlans={deliveryPlans} />}
+        {tab === "history" && <AdminVersionHistory configRevision={configRevision} configStatus={configStatus} onRestore={onRestoreConfigVersion} />}
       </main>
     </div>
   );
 }
 
-function AdminRoute() {
+function AdminRoute({
+  answerConfigs,
+  setAnswerConfigs,
+  faqConfigs,
+  setFaqConfigs,
+  deliveryPlans,
+  setDeliveryPlans,
+  reportedQuestions,
+  setReportedQuestions,
+  onSaveFaqContent,
+  onSaveProactiveMessages,
+  onSaveUnansweredQuestion,
+  onRestoreConfigVersion,
+  configRevision,
+  configStatus,
+}: {
+  answerConfigs: ChatAnswerConfig[];
+  setAnswerConfigs: React.Dispatch<React.SetStateAction<ChatAnswerConfig[]>>;
+  faqConfigs: FaqConfigItem[];
+  setFaqConfigs: React.Dispatch<React.SetStateAction<FaqConfigItem[]>>;
+  deliveryPlans: DailyDeliveryPlan[];
+  setDeliveryPlans: React.Dispatch<React.SetStateAction<DailyDeliveryPlan[]>>;
+  reportedQuestions: ReportedQuestion[];
+  setReportedQuestions: React.Dispatch<React.SetStateAction<ReportedQuestion[]>>;
+  onSaveFaqContent: (payload: { faqConfigs: FaqConfigItem[]; answerConfigs: ChatAnswerConfig[] }) => Promise<void>;
+  onSaveProactiveMessages: (plans: DailyDeliveryPlan[]) => Promise<void>;
+  onSaveUnansweredQuestion: (question: ReportedQuestion) => Promise<ReportedQuestion>;
+  onRestoreConfigVersion: (revision: number) => Promise<void>;
+  configRevision: number;
+  configStatus: SharedConfigStatus;
+}) {
   const devPreview = import.meta.env.DEV && new URLSearchParams(window.location.search).get("preview") === "1";
   const [session, setSession] = useState<AdminSessionState>(devPreview ? "authenticated" : "checking");
-  const [reportedQuestions, setReportedQuestions] = useState<ReportedQuestion[]>(INITIAL_REPORTED_QUESTIONS);
 
   useEffect(() => {
     if (devPreview) return;
@@ -3525,6 +4381,22 @@ function AdminRoute() {
       });
     return () => { active = false; };
   }, [devPreview]);
+
+  useEffect(() => {
+    if (session !== "authenticated") return;
+    let active = true;
+    fetch("/api/admin/unanswered", { cache: "no-store" })
+      .then(async (response) => {
+        const raw = await response.json().catch(() => ({})) as Record<string, unknown>;
+        if (!response.ok || !Array.isArray(raw.questions) || !active) return;
+        setReportedQuestions(raw.questions.flatMap((question) => {
+          const parsed = parseReportedQuestion(question);
+          return parsed ? [parsed] : [];
+        }));
+      })
+      .catch(() => undefined);
+    return () => { active = false; };
+  }, [session, setReportedQuestions]);
 
   async function logout() {
     await fetch("/api/admin/logout", { method: "POST" }).catch(() => undefined);
@@ -3560,6 +4432,18 @@ function AdminRoute() {
       onLogout={logout}
       reportedQuestions={reportedQuestions}
       setReportedQuestions={setReportedQuestions}
+      answerConfigs={answerConfigs}
+      setAnswerConfigs={setAnswerConfigs}
+      faqConfigs={faqConfigs}
+      setFaqConfigs={setFaqConfigs}
+      deliveryPlans={deliveryPlans}
+      setDeliveryPlans={setDeliveryPlans}
+      onSaveFaqContent={onSaveFaqContent}
+      onSaveProactiveMessages={onSaveProactiveMessages}
+      onSaveUnansweredQuestion={onSaveUnansweredQuestion}
+      onRestoreConfigVersion={onRestoreConfigVersion}
+      configRevision={configRevision}
+      configStatus={configStatus}
     />
   );
 }
@@ -3570,35 +4454,199 @@ export default function App() {
   const [role, setRole] = useState<Role | null>(null);
   const [segment, setSegment] = useState<PlayerSegment | null>(null);
   const [reportedQuestions, setReportedQuestions] = useState<ReportedQuestion[]>(INITIAL_REPORTED_QUESTIONS);
+  const [answerConfigs, setAnswerConfigs] = useState<ChatAnswerConfig[]>(loadChatAnswers);
+  const [faqConfigs, setFaqConfigs] = useState<FaqConfigItem[]>(loadFaqConfigs);
+  const [deliveryPlans, setDeliveryPlans] = useState<DailyDeliveryPlan[]>(INITIAL_DAILY_DELIVERY_PLANS);
+  const [configRevision, setConfigRevision] = useState(0);
+  const [configStatus, setConfigStatus] = useState<SharedConfigStatus>("loading");
+
+  useEffect(() => {
+    window.localStorage.setItem(CHAT_ANSWERS_STORAGE_KEY, JSON.stringify(answerConfigs));
+  }, [answerConfigs]);
+
+  useEffect(() => {
+    window.localStorage.setItem(FAQ_CONFIG_STORAGE_KEY, JSON.stringify(faqConfigs));
+  }, [faqConfigs]);
+
+  useEffect(() => {
+    let active = true;
+
+    async function loadSharedConfig() {
+      try {
+        const response = await fetch("/api/config", { cache: "no-store" });
+        if (!response.ok) throw new Error("Shared configuration is unavailable");
+        const raw = await response.json() as unknown;
+        if (!raw || typeof raw !== "object") throw new Error("Shared configuration is invalid");
+        const config = raw as Record<string, unknown>;
+        if (!Number.isInteger(config.revision) || (config.revision as number) < 0) {
+          throw new Error("Shared configuration has an invalid revision");
+        }
+        if (!active) return;
+
+        const publishedSections = parsePublishedSections(config.publishedSections);
+        if (publishedSections.includes("faq_content")) {
+          setFaqConfigs(normalizeFaqConfigs(config.faqConfigs));
+          setAnswerConfigs(mergeChatAnswers(config.answerConfigs));
+        }
+        if (publishedSections.includes("proactive_messages")) {
+          setDeliveryPlans(normalizeDeliveryPlans(config.deliveryPlans));
+        }
+        setConfigRevision(config.revision as number);
+        setConfigStatus("ready");
+      } catch {
+        if (active) setConfigStatus("local-fallback");
+      }
+    }
+
+    void loadSharedConfig();
+    return () => { active = false; };
+  }, []);
+
+  async function saveSharedConfig(section: ConfigSection, payload: unknown) {
+    if (configStatus !== "ready") {
+      throw new Error("Shared storage ยังไม่พร้อมใช้งาน กรุณาเปิดผ่าน deployment ที่ตั้งค่า Supabase แล้ว");
+    }
+    const response = await fetch("/api/admin/config", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ section, expectedRevision: configRevision, payload }),
+    });
+    const body = await response.json().catch(() => ({})) as Record<string, unknown>;
+    if (!response.ok) {
+      if (body.code === "REVISION_CONFLICT") {
+        throw new Error("มีการแก้ไขจาก Admin อีกหน้าต่างหนึ่ง กรุณาโหลดหน้านี้ใหม่ก่อนบันทึก");
+      }
+      throw new Error(typeof body.error === "string" ? body.error : "ไม่สามารถบันทึกการเปลี่ยนแปลงได้");
+    }
+    if (!Number.isInteger(body.revision)) {
+      throw new Error("ระบบบันทึกข้อมูลไม่สมบูรณ์ กรุณาลองใหม่");
+    }
+    setConfigRevision(body.revision as number);
+  }
+
+  function saveFaqContent(payload: { faqConfigs: FaqConfigItem[]; answerConfigs: ChatAnswerConfig[] }) {
+    return saveSharedConfig("faq_content", payload);
+  }
+
+  function saveProactiveMessages(plans: DailyDeliveryPlan[]) {
+    return saveSharedConfig("proactive_messages", { deliveryPlans: plans });
+  }
+
+  async function restoreConfigVersion(revision: number) {
+    if (configStatus !== "ready") {
+      throw new Error("Shared storage ยังไม่พร้อมใช้งาน กรุณาเปิดผ่าน deployment ที่ตั้งค่า Supabase แล้ว");
+    }
+    const response = await fetch("/api/admin/config/versions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ revision, expectedRevision: configRevision }),
+    });
+    const raw = await response.json().catch(() => ({})) as Record<string, unknown>;
+    if (!response.ok) {
+      if (raw.code === "REVISION_CONFLICT") {
+        throw new Error("มีการแก้ไขจาก Admin อีกหน้าต่างหนึ่ง กรุณาโหลดหน้านี้ใหม่ก่อนคืนค่า");
+      }
+      throw new Error(typeof raw.error === "string" ? raw.error : "ไม่สามารถคืนค่า version ได้");
+    }
+    if (!Number.isInteger(raw.revision)) throw new Error("ระบบคืนค่าข้อมูลไม่สมบูรณ์ กรุณาลองใหม่");
+    const publishedSections = parsePublishedSections(raw.publishedSections);
+    if (publishedSections.includes("faq_content")) {
+      setFaqConfigs(normalizeFaqConfigs(raw.faqConfigs));
+      setAnswerConfigs(mergeChatAnswers(raw.answerConfigs));
+    }
+    if (publishedSections.includes("proactive_messages")) {
+      setDeliveryPlans(normalizeDeliveryPlans(raw.deliveryPlans));
+    }
+    setConfigRevision(raw.revision as number);
+  }
+
+  async function saveUnansweredQuestion(question: ReportedQuestion): Promise<ReportedQuestion> {
+    if (configStatus !== "ready") {
+      throw new Error("Shared storage ยังไม่พร้อมใช้งาน กรุณาเปิดผ่าน deployment ที่ตั้งค่า Supabase แล้ว");
+    }
+    const response = await fetch("/api/admin/unanswered", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        id: question.id,
+        status: question.status,
+        relatedTopicId: question.relatedTopicId,
+      }),
+    });
+    const raw = await response.json().catch(() => ({})) as unknown;
+    if (!response.ok) {
+      const body = raw && typeof raw === "object" ? raw as Record<string, unknown> : {};
+      throw new Error(typeof body.error === "string" ? body.error : "ไม่สามารถบันทึกคำถามได้");
+    }
+    const saved = parseReportedQuestion(raw);
+    if (!saved) throw new Error("ระบบบันทึกคำถามไม่สมบูรณ์ กรุณาลองใหม่");
+    return saved;
+  }
 
   const isAdminRoute = window.location.pathname === "/admin" || window.location.pathname.startsWith("/admin/");
 
   function handleReportQuestion(question: string, recentContext: string) {
-    const normalized = question.trim().toLowerCase();
+    const cleanQuestion = question.trim();
+    if (cleanQuestion.length < 2) return;
+    const normalized = cleanQuestion.toLowerCase();
+    const today = new Date().toISOString().slice(0, 10);
     setReportedQuestions((prev) => {
       const existing = prev.find((q) => q.question.trim().toLowerCase() === normalized);
       if (existing) {
         return prev.map((q) =>
           q.id === existing.id
-            ? { ...q, count: q.count + 1, lastSeen: new Date().toISOString().slice(0, 10), recentContext }
+            ? { ...q, count: q.count + 1, lastSeen: today, recentContext }
             : q
         );
       }
       const newEntry: ReportedQuestion = {
         id: uid(),
-        question: question.trim(),
+        question: cleanQuestion,
         onboardingDay: 2,
         count: 1,
-        firstSeen: new Date().toISOString().slice(0, 10),
-        lastSeen: new Date().toISOString().slice(0, 10),
+        firstSeen: today,
+        lastSeen: today,
         status: "new",
         recentContext,
       };
       return [...prev, newEntry];
     });
+
+    void fetch("/api/unanswered", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ question: cleanQuestion, onboardingDay: 2, recentContext }),
+    })
+      .then(async (response) => response.ok ? parseReportedQuestion(await response.json()) : null)
+      .then((saved) => {
+        if (!saved) return;
+        setReportedQuestions((prev) => {
+          const matching = prev.find((item) => item.question.trim().toLowerCase() === normalized);
+          if (matching) return prev.map((item) => item.id === matching.id ? saved : item);
+          return [saved, ...prev];
+        });
+      })
+      .catch(() => undefined);
   }
 
-  if (isAdminRoute) return <AdminRoute />;
+  if (isAdminRoute) return (
+    <AdminRoute
+      answerConfigs={answerConfigs}
+      setAnswerConfigs={setAnswerConfigs}
+      faqConfigs={faqConfigs}
+      setFaqConfigs={setFaqConfigs}
+      deliveryPlans={deliveryPlans}
+      setDeliveryPlans={setDeliveryPlans}
+      reportedQuestions={reportedQuestions}
+      setReportedQuestions={setReportedQuestions}
+      onSaveFaqContent={saveFaqContent}
+      onSaveProactiveMessages={saveProactiveMessages}
+      onSaveUnansweredQuestion={saveUnansweredQuestion}
+      onRestoreConfigVersion={restoreConfigVersion}
+      configRevision={configRevision}
+      configStatus={configStatus}
+    />
+  );
 
   if (role === null) {
     return <LoginScreen onLogin={() => {
@@ -3623,6 +4671,8 @@ export default function App() {
         setSegment(null);
       }}
       onReportQuestion={handleReportQuestion}
+      answerConfigs={answerConfigs}
+      faqConfigs={faqConfigs}
     />
   );
 }
