@@ -3,6 +3,14 @@ import type { VercelRequest, VercelResponse } from "@vercel/node";
 const DEFAULT_CHATFLOW_URL = "https://ai.insea.io/api/chatflows/24426/run";
 const MAX_QUERY_LENGTH = 2_000;
 const REQUEST_TIMEOUT_MS = 20_000;
+const ACTION_IDS = [
+  "education_hub",
+  "discord",
+  "customer_support",
+  "report_question",
+] as const;
+
+type ActionId = (typeof ACTION_IDS)[number];
 
 type InseaEvent = {
   answer?: unknown;
@@ -78,6 +86,30 @@ function parseInseaResponse(raw: string, contentType: string) {
   return { answer: parts.join("").trim(), conversationId };
 }
 
+function parseStructuredAnswer(rawAnswer: string) {
+  const candidate = rawAnswer
+    .trim()
+    .replace(/^```(?:json)?\s*/i, "")
+    .replace(/\s*```$/, "")
+    .trim();
+
+  try {
+    const parsed = JSON.parse(candidate) as { answer?: unknown; actions?: unknown };
+    if (typeof parsed.answer !== "string" || !parsed.answer.trim()) {
+      return { answer: rawAnswer, actions: [] as ActionId[] };
+    }
+    const actions = Array.isArray(parsed.actions)
+      ? parsed.actions.filter(
+          (action): action is ActionId =>
+            typeof action === "string" && ACTION_IDS.includes(action as ActionId),
+        )
+      : [];
+    return { answer: parsed.answer.trim(), actions: [...new Set(actions)].slice(0, 2) };
+  } catch {
+    return { answer: rawAnswer, actions: [] as ActionId[] };
+  }
+}
+
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   res.setHeader("Cache-Control", "no-store");
 
@@ -148,8 +180,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       return res.status(502).json({ error: "AI-INsea returned an empty answer" });
     }
 
+    const structured = parseStructuredAnswer(parsed.answer);
+
     return res.status(200).json({
-      answer: parsed.answer,
+      answer: structured.answer,
+      actions: structured.actions,
       conversationId: parsed.conversationId,
       route: "ai_insea",
     });

@@ -8,7 +8,10 @@ Web prototype for proactive first-week FC Online onboarding support.
 2. Return the deterministic content answer and source card when matched.
 3. Call the server-side `/api/chat` endpoint only for an unmatched question.
 4. `/api/chat` proxies to AI-INsea chatflow `24426`; the bearer token never enters the browser bundle.
-5. If AI-INsea is unavailable, show related content, Discord escalation, and the report-to-team action.
+5. AI-INsea returns a concise answer plus zero to two trusted action IDs. The web app owns the approved destination URLs and renders them as buttons.
+6. If AI-INsea is unavailable, show related content, Discord escalation, and the report-to-team action.
+
+The fallback prompt and response contract are documented in [`docs/AI-INSEA-FALLBACK-PROMPT.md`](docs/AI-INSEA-FALLBACK-PROMPT.md).
 
 ## Local verification
 

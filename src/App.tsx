@@ -1,12 +1,15 @@
 import { useState, useRef, useEffect } from "react";
-import { MessageCircle, LogOut, Send, Globe, Play, Calendar, BookOpen, GitBranch, Eye, Search, ExternalLink, Clock, LockKeyhole } from "lucide-react";
+import { MessageCircle, LogOut, Send, Globe, Play, BookOpen, GitBranch, Eye, Search, ExternalLink, Clock, LockKeyhole } from "lucide-react";
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
 type Role = "player";
 type PlayerTab = "chat" | "notifications";
-type ChipMode = "diagnose" | "deeper" | "post-video" | "want-tip";
+type PlayerSegment = "new-under-month" | "returning-under-month" | "experienced";
+type ChipMode = "activation" | "competence" | "next-goal" | "post-content";
 type Day = 1 | 2 | 3;
+type JourneyStageId = "activation" | "competence" | "next-goal";
+type ResponseActionId = "education_hub" | "discord" | "customer_support" | "report_question";
 
 interface AppNotification {
   id: string;
@@ -45,6 +48,7 @@ interface Message {
   relatedIds?: string[];
   showDiscord?: boolean;
   reportQuestion?: string;
+  actions?: ResponseActionId[];
 }
 
 
@@ -67,20 +71,28 @@ interface ContentBranch {
   escalationLabel?: string;
 }
 
-type DeliveryDay = 1 | 2 | 3 | 4 | 5 | 6 | 7;
+type DeliveryDay = Day;
 type DeliveryChannel = "notification" | "chat";
+type DeliveryTrigger = "segment_selected" | "session_start" | "after_response" | "content_completed" | "unresolved_return" | "before_handoff";
 
 interface DailyDeliveryPlan {
   id: string;
   day: DeliveryDay;
+  stageId: JourneyStageId;
+  name: string;
   channel: DeliveryChannel;
-  availableTime: string;
+  trigger: DeliveryTrigger;
+  triggerDetail: string;
   message: string;
   contentId?: string;
+  responseOptions: string[];
+  nextAction: string;
+  successEvent: string;
+  fallback: string;
   status: "active" | "draft";
 }
 
-type AdminTab = "daily-delivery" | "content-library" | "content-flows" | "unanswered" | "preview";
+type AdminTab = "overview" | "proactive-messages" | "faq-content" | "unanswered" | "preview";
 
 interface ReportedQuestion {
   id: string;
@@ -929,19 +941,54 @@ function getCannedAnswer(cannedKey: string, knowledge?: KnowledgeItem): CannedAn
   return base;
 }
 
-// ── Day plan configuration ─────────────────────────────────────────────────────
+// ── Player journey configuration ───────────────────────────────────────────────
 
 const MASCOT =
   "https://images.unsplash.com/photo-1740252117044-2af197eea287?w=120&h=120&fit=crop&auto=format";
 
-const CURRENT_DAY: Day = 2;
+const EDUCATION_HUB_URL = "https://educationhub.fconline.garena.in.th/";
+const DISCORD_URL = "https://discord.gg/gv4H2ty9Z";
+const CUSTOMER_SUPPORT_URL = "https://cs.agentic.garena.in.th/service/fc-online";
 
+interface JourneyStageDefinition {
+  id: JourneyStageId;
+  day: Day;
+  title: string;
+  businessOutcome: string;
+  playerNeed: string;
+  researchSignal: string;
+  successEvent: string;
+}
 
-const DAY_DIAGNOSTIC: Record<Day, string> = {
-  1: "วันนี้คุณตั้งค่าเกมเสร็จแล้วหรือยัง?",
-  2: "วันนี้คุณส่งบอลเป็นหรือยัง?",
-  3: "วันนี้เริ่มทำภารกิจรับ BP แล้วหรือยัง?",
-};
+const JOURNEY_STAGES: JourneyStageDefinition[] = [
+  {
+    id: "activation",
+    day: 1,
+    title: "Activation",
+    businessOutcome: "ผู้เล่นเริ่มเล่นได้และระบุจุดที่ติดได้",
+    playerNeed: "เข้าใจปุ่ม เมนู และวิธีเริ่มแมตช์แรก",
+    researchSignal: "Day 1 onsite: ผู้เล่นต้องการคำแนะนำที่พาไปทำได้ทันที",
+    successEvent: "เลือก blocker หรือเปิดคอนเทนต์พื้นฐานครั้งแรก",
+  },
+  {
+    id: "competence",
+    day: 2,
+    title: "Competence",
+    businessOutcome: "ผู้เล่นรู้สึกว่าตัวเองเล่นและพัฒนาทีมได้ดีขึ้น",
+    playerNeed: "เรียนรู้ตามจุดอ่อน ไม่ถูกบังคับดูคลิปเดิม",
+    researchSignal: "Days 2–3: ความสนุกเพิ่มเมื่อเกิด mastery แต่ลดลงเมื่อการแข่งขันรู้สึกไม่แฟร์",
+    successEvent: "เลือกหนึ่งทักษะหรือเป้าหมายทีมและตอบ follow-up",
+  },
+  {
+    id: "next-goal",
+    day: 3,
+    title: "Next goal",
+    businessOutcome: "ผู้เล่นมีเหตุผลกลับมาและรู้ช่องทางช่วยเหลือต่อ",
+    playerNeed: "เลือกเป้าหมายเรื่องทีม เศรษฐกิจ หรือการเล่นร่วมกับคนอื่น",
+    researchSignal: "Days 4–5 directional: team identity, economy และ social play ขยายแรงจูงใจ",
+    successEvent: "เลือก next goal หรือไป Educational Hub / Discord ตามความต้องการ",
+  },
+];
 
 const FALLBACK_RELATED_IDS = ["dribbling", "shooting", "defending", "qss", "controller"];
 
@@ -1153,6 +1200,128 @@ function LoginScreen({ onLogin }: { onLogin: () => void }) {
   );
 }
 
+function PlayerSegmentScreen({ onSelect }: { onSelect: (segment: PlayerSegment) => void }) {
+  const options: { id: PlayerSegment; title: string; description: string }[] = [
+    {
+      id: "new-under-month",
+      title: "เพิ่งเริ่มเล่น",
+      description: "เล่น FC Online มาไม่ถึง 1 เดือน",
+    },
+    {
+      id: "returning-under-month",
+      title: "เพิ่งกลับมาเล่น",
+      description: "กลับมาเล่นอีกครั้งไม่ถึง 1 เดือน",
+    },
+    {
+      id: "experienced",
+      title: "เล่นอยู่แล้ว",
+      description: "เล่นเกิน 1 เดือนและเข้าใจระบบหลักแล้ว",
+    },
+  ];
+
+  return (
+    <div className="min-h-screen flex items-center justify-center p-6" style={{ backgroundColor: "var(--background)" }}>
+      <div className="w-full max-w-xl">
+        <div className="flex items-center gap-3 mb-7">
+          <div className="w-12 h-12 rounded-full overflow-hidden shrink-0" style={{ backgroundColor: "var(--muted)" }}>
+            <img src={MASCOT} alt="FCO Rookie Coach mascot" className="w-full h-full object-cover" />
+          </div>
+          <div>
+            <p className="text-[10px] font-semibold tracking-widest uppercase" style={{ color: "var(--primary)" }}>FCO Rookie Coach</p>
+            <h1 className="text-xl font-bold mt-0.5" style={{ color: "var(--foreground)" }}>ตอนนี้คุณอยู่ช่วงไหนของการเล่น?</h1>
+          </div>
+        </div>
+
+        <div className="grid gap-3">
+          {options.map((option) => (
+            <button
+              key={option.id}
+              onClick={() => onSelect(option.id)}
+              className="w-full rounded-xl border px-5 py-4 text-left flex items-center justify-between gap-4 transition-colors"
+              style={{ borderColor: "var(--border)", backgroundColor: "var(--card)" }}
+              onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = "var(--muted)")}
+              onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = "var(--card)")}
+            >
+              <span>
+                <span className="block text-sm font-semibold" style={{ color: "var(--foreground)" }}>{option.title}</span>
+                <span className="block text-xs mt-1" style={{ color: "var(--muted-foreground)" }}>{option.description}</span>
+              </span>
+              <span className="text-lg" aria-hidden style={{ color: "var(--muted-foreground)" }}>›</span>
+            </button>
+          ))}
+        </div>
+
+        <p className="text-xs mt-4 text-center" style={{ color: "var(--muted-foreground)" }}>
+          เราจะใช้คำตอบนี้เพื่อเลือกคำแนะนำที่เหมาะกับคุณ
+        </p>
+      </div>
+    </div>
+  );
+}
+
+function ExperiencedPlayerScreen({ onBack }: { onBack: () => void }) {
+  return (
+    <div className="min-h-screen flex items-center justify-center p-6" style={{ backgroundColor: "var(--background)" }}>
+      <div className="w-full max-w-lg">
+        <div className="flex items-center gap-3 mb-7">
+          <div className="w-12 h-12 rounded-full overflow-hidden shrink-0" style={{ backgroundColor: "var(--muted)" }}>
+            <img src={MASCOT} alt="FCO Rookie Coach mascot" className="w-full h-full object-cover" />
+          </div>
+          <div>
+            <p className="text-[10px] font-semibold tracking-widest uppercase" style={{ color: "var(--primary)" }}>FCO Rookie Coach</p>
+            <h1 className="text-xl font-bold mt-0.5" style={{ color: "var(--foreground)" }}>เลือกพื้นที่ที่เหมาะกับคุณ</h1>
+          </div>
+        </div>
+
+        <div className="grid gap-3">
+          <a
+            href={EDUCATION_HUB_URL}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="rounded-xl border px-5 py-4 flex items-center gap-4 transition-colors"
+            style={{ borderColor: "var(--border)", backgroundColor: "var(--card)", color: "var(--foreground)" }}
+          >
+            <span className="w-10 h-10 rounded-full flex items-center justify-center shrink-0" style={{ backgroundColor: "rgba(196,30,30,0.08)", color: "var(--primary)" }}>
+              <BookOpen size={18} aria-hidden />
+            </span>
+            <span className="flex-1">
+              <span className="block text-sm font-semibold">Educational Hub</span>
+              <span className="block text-xs mt-1" style={{ color: "var(--muted-foreground)" }}>ดูคลังวิดีโอ เทคนิค และข้อมูลเกมทั้งหมด</span>
+            </span>
+            <ExternalLink size={15} style={{ color: "var(--muted-foreground)" }} aria-hidden />
+          </a>
+
+          <div className="rounded-xl border px-5 py-4" style={{ borderColor: "var(--border)", backgroundColor: "var(--card)" }}>
+            <div className="flex items-start gap-4">
+              <span className="w-10 h-10 rounded-full flex items-center justify-center shrink-0" style={{ backgroundColor: "var(--muted)", color: "var(--foreground)" }}>
+                <MessageCircle size={18} aria-hidden />
+              </span>
+              <div className="flex-1">
+                <p className="text-sm font-semibold" style={{ color: "var(--foreground)" }}>เข้า Discord FC Online แล้วหรือยัง?</p>
+                <p className="text-xs mt-1 leading-relaxed" style={{ color: "var(--muted-foreground)" }}>ถามผู้เล่นคนอื่น หาเพื่อน และติดตามกิจกรรมจากชุมชน</p>
+                <a
+                  href={DISCORD_URL}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="mt-3 h-9 px-4 rounded-lg inline-flex items-center gap-2 text-xs font-semibold"
+                  style={{ backgroundColor: "var(--primary)", color: "var(--primary-foreground)" }}
+                >
+                  เข้า Discord FC Online
+                  <ExternalLink size={13} aria-hidden />
+                </a>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <button onClick={onBack} className="mt-5 text-xs w-full text-center hover:underline" style={{ color: "var(--muted-foreground)" }}>
+          กลับไปเลือกประเภทผู้เล่น
+        </button>
+      </div>
+    </div>
+  );
+}
+
 // ── Admin gateway ─────────────────────────────────────────────────────────────
 
 type AdminSessionState = "checking" | "signed-out" | "authenticated" | "unconfigured";
@@ -1232,24 +1401,24 @@ function AdminLoginScreen({ onAuthenticated }: { onAuthenticated: () => void }) 
 const INITIAL_NOTIFICATIONS: AppNotification[] = [
   {
     id: "notif-1",
-    title: "ยินดีต้อนรับสู่ FCO Rookie Coach!",
-    body: "เริ่มต้นด้วยการเรียนรู้พื้นฐานการส่งบอล แค่ 5 นาทีก็เล่นได้มั่นใจขึ้นแล้ว",
+    title: "มีอะไรติดก่อนลงสนามไหม?",
+    body: "บอกโค้ชได้เลยว่าติดเรื่องปุ่ม เมนู หรือการเริ่มแมตช์ แล้วค่อยเปิดเนื้อหาที่ตรงกับคุณ",
     time: "วันนี้ 09:00",
     read: true,
     topicId: "passing",
   },
   {
     id: "notif-2",
-    title: "เคล็ดลับ: ควบคุมปุ่มให้คล่อง",
-    body: "รู้จักปุ่มพื้นฐานทั้งหมดก่อนลงสนาม จะช่วยให้คุณตัดสินใจได้เร็วขึ้นมากในเกม",
+    title: "เลือกหนึ่งเรื่องที่อยากเล่นให้ดีขึ้น",
+    body: "จะฝึกส่งบอล เกมรับ หรือจัดทีมก่อนก็ได้ โค้ชจะไม่ส่งคลิปเดิมซ้ำถ้าคุณเคยดูแล้ว",
     time: "เมื่อวาน 10:30",
     read: false,
     topicId: "controller",
   },
   {
     id: "notif-3",
-    title: "ภารกิจสะสม BP พร้อมแล้ว!",
-    body: "ทำ Squad Battle และ Rivals เพื่อรับ BP สะสมเสริมความแข็งแกร่งให้ทีมได้เลย",
+    title: "เป้าหมายต่อไปของคุณคืออะไร?",
+    body: "เลือกเรื่องสร้างทีม หา BP หรือเล่นกับเพื่อน เพื่อรับคำแนะนำและช่องทางต่อที่เหมาะกับคุณ",
     time: "เมื่อวาน 18:00",
     read: false,
   },
@@ -1258,21 +1427,22 @@ const INITIAL_NOTIFICATIONS: AppNotification[] = [
 // ── CoachScreen ────────────────────────────────────────────────────────────────
 
 function CoachScreen({
+  segment,
   onLogout,
   onReportQuestion,
 }: {
+  segment: Exclude<PlayerSegment, "experienced">;
   onLogout: () => void;
   onReportQuestion: (question: string, recentContext: string) => void;
 }) {
-  const day = CURRENT_DAY;
-
   const [activeTab, setActiveTab] = useState<PlayerTab>("chat");
   const [notifications, setNotifications] = useState<AppNotification[]>(INITIAL_NOTIFICATIONS);
   const [expandedNotifId, setExpandedNotifId] = useState<string | null>(null);
 
   const [messages, setMessages] = useState<Message[]>([]);
   const [isTyping, setIsTyping] = useState(false);
-  const [chipMode, setChipMode] = useState<ChipMode | null>("diagnose");
+  const [chipMode, setChipMode] = useState<ChipMode | null>("activation");
+  const [journeyStage, setJourneyStage] = useState<JourneyStageId>("activation");
   const [shownTopicIds, setShownTopicIds] = useState<Set<string>>(new Set<string>());
   const [input, setInput] = useState("");
   const [conversationId, setConversationId] = useState<string | undefined>();
@@ -1290,9 +1460,16 @@ function CoachScreen({
 
   useEffect(() => {
     setMessages([
-      { id: uid(), role: "assistant", text: DAY_DIAGNOSTIC[day] },
+      {
+        id: uid(),
+        role: "assistant",
+        text: segment === "returning-under-month"
+          ? "ยินดีต้อนรับกลับมาครับ ตอนนี้ส่วนไหนของเกมที่ยังไม่คุ้นที่สุด?"
+          : "ยินดีต้อนรับครับ ตอนนี้ส่วนไหนของเกมที่ยังติดอยู่?",
+      },
     ]);
-    setChipMode("diagnose");
+    setJourneyStage("activation");
+    setChipMode("activation");
     setShownTopicIds(new Set<string>());
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -1313,140 +1490,93 @@ function CoachScreen({
     setShownTopicIds((prev) => new Set([...prev, id]));
   }
 
-  // ─ Diagnose chips ─────────────────────────────────────────────────────────
+  function openCompetencePrompt() {
+    setJourneyStage("competence");
+    append([{ role: "assistant", text: "ตอนนี้อยากพัฒนาเรื่องไหนให้เล่นได้มั่นใจขึ้น?" }]);
+    setChipMode("competence");
+  }
 
-  function handleCanDo() {
+  function openNextGoalPrompt() {
+    setJourneyStage("next-goal");
+    append([{ role: "assistant", text: "ต่อจากนี้อยากตั้งเป้าหมายเรื่องไหนก่อน?" }]);
+    setChipMode("next-goal");
+  }
+
+  function presentJourneyContent(label: string, topicId: string) {
     setChipMode(null);
-    append([{ role: "user", text: "ทำได้แล้ว" }]);
+    append([{ role: "user", text: label }]);
+    const topic = findKnowledge(topicId);
+    const alreadyShown = shownTopicIds.has(topicId);
     botDelay(() => {
-      append([{ role: "assistant", text: "เก่งมากเลยครับ!\nเวลาโดนบีบ คุณเลือกส่งแบบไหน?" }]);
-      setChipMode("deeper");
+      if (!alreadyShown) showTopic(topicId);
+      append([
+        {
+          role: "assistant",
+          text: alreadyShown
+            ? `เราเคยเปิดเรื่อง ${topic?.title ?? label} แล้วครับ ตอนนี้ติดขั้นตอนไหนเป็นพิเศษ?`
+            : topic?.shortSummary ?? "ลองดูเนื้อหานี้ก่อน แล้วบอกผมได้เลยว่ายังติดตรงไหน",
+          knowledgeId: alreadyShown ? undefined : topicId,
+        },
+        { role: "assistant", text: "ดูแล้วเป็นอย่างไรบ้าง?" },
+      ]);
+      setChipMode("post-content");
     });
   }
 
-  function handleWantMore() {
+  function handleActivationReady() {
     setChipMode(null);
-    append([{ role: "user", text: "อยากรู้เพิ่ม" }]);
-    sendPassingContent();
+    append([{ role: "user", text: "เริ่มเล่นได้แล้ว" }]);
+    botDelay(openCompetencePrompt, 550);
   }
 
-  function handleNotSure() {
-    setChipMode(null);
-    append([{ role: "user", text: "ยังไม่แน่ใจ" }]);
-    sendPassingContent();
-  }
-
-  function sendPassingContent() {
-    const topic = findKnowledge("passing");
-    botDelay(() => {
-      showTopic("passing");
-      append([
-        { role: "assistant", text: topic?.shortSummary ?? "", knowledgeId: "passing" },
-        { role: "assistant", text: "หลังดูแล้ว ยังติดตรงไหนไหม?" },
-      ]);
-      setChipMode("post-video");
-    });
-  }
-
-  // ─ Deeper passing chips ───────────────────────────────────────────────────
-
-  function handlePassShort() {
-    setChipMode(null);
-    append([{ role: "user", text: "ส่งสั้น" }]);
-    botDelay(() => {
-      append([{ role: "assistant", text: "ส่งสั้นถูกต้องเลยครับ กด A/X แล้วกดเบา ๆ ผู้รับจะวิ่งมารับเอง อยากรู้เพิ่มอีกไหม?" }]);
-      setChipMode("want-tip");
-    }, 600);
-  }
-
-  function handleThroughBall() {
-    setChipMode(null);
-    append([{ role: "user", text: "แทงทะลุช่อง" }]);
-    botDelay(() => {
-      append([{ role: "assistant", text: "ถูกต้องเลยครับ LB/L1 + A/X เล็งที่ช่องว่าง ไม่ใช่ตัวผู้รับ รอผู้รับเริ่มวิ่งก่อนค่อยกด อยากรู้เพิ่มอีกไหม?" }]);
-      setChipMode("want-tip");
-    }, 600);
-  }
-
-  function handleCantChoose() {
-    setChipMode(null);
-    append([{ role: "user", text: "ยังเลือกไม่ถูก" }]);
-    const alreadyShown = shownTopicIds.has("passing");
-    botDelay(() => {
-      if (!alreadyShown) showTopic("passing");
-      append([
-        { role: "assistant", text: "กฎง่าย ๆ ครับ: ผู้รับอยู่ใกล้ → กด A/X, อยู่ไกล → กด Y/△, มีช่องว่าง → LB/L1 + A/X แค่นี้พอสำหรับมือใหม่" },
-        ...(!alreadyShown ? [{ role: "assistant" as const, text: "", knowledgeId: "passing" }] : []),
-      ]);
-    });
-  }
-
-  function handleWantTip() {
-    setChipMode(null);
-    append([{ role: "user", text: "ได้เลย" }]);
-    const alreadyShown = shownTopicIds.has("passing");
-    botDelay(() => {
-      if (!alreadyShown) showTopic("passing");
-      append([
-        { role: "assistant", text: "กดปุ่มค้างนานขึ้นจะส่งแรงขึ้น กดสั้น ๆ จะส่งเบา ฝึกกะแรงในสนามฝึกก่อนใช้จริงครับ" },
-        ...(!alreadyShown ? [{ role: "assistant" as const, text: "", knowledgeId: "passing" }] : []),
-      ]);
-    }, 600);
-  }
-
-  function handleNoTip() {
-    setChipMode(null);
-    append([{ role: "user", text: "ไม่เป็นไร" }]);
-    botDelay(() => {
-      append([{ role: "assistant", text: "โอเคครับ ลองไปฝึกในเกมได้เลย มีอะไรสงสัยพิมพ์ถามได้ตลอดนะ" }]);
-    }, 500);
-  }
-
-  // ─ Post-video chips ───────────────────────────────────────────────────────
-
-  function handleUnderstood() {
+  function handleContentUnderstood() {
     setChipMode(null);
     append([{ role: "user", text: "เข้าใจแล้ว" }]);
     botDelay(() => {
-      append([{ role: "assistant", text: "เยี่ยมเลยครับ ลองนำไปใช้ในเกมได้เลย มีอะไรสงสัยพิมพ์ถามได้ตลอดนะ" }]);
-    }, 500);
+      if (journeyStage === "activation") openCompetencePrompt();
+      else if (journeyStage === "competence") openNextGoalPrompt();
+      else append([{ role: "assistant", text: "ดีมากครับ เป้าหมายต่อไปชัดแล้ว ถ้ามีอะไรติดขัดกลับมาถามผมได้เสมอ" }]);
+    }, 550);
   }
 
-  function handleConfusedButton() {
+  function handleStillStuck() {
     setChipMode(null);
-    append([{ role: "user", text: "งงเรื่องปุ่ม" }]);
-    const relatedId = shownTopicIds.has("controller") ? undefined : "controller";
+    append([{ role: "user", text: "ยังติดอยู่" }]);
     botDelay(() => {
-      if (relatedId) showTopic(relatedId);
-      append([{
-        role: "assistant",
-        text: "ปุ่มหลัก: A/X ส่งพื้น • Y/△ เปิดสูง • LB/L1 ส่งทะลุช่อง\nลองกดทีละอันในสนามฝึกก่อนนะครับ",
-        knowledgeId: relatedId,
-      }]);
-    }, 600);
-  }
-
-  function handleConfusedTiming() {
-    setChipMode(null);
-    append([{ role: "user", text: "งงเรื่องจังหวะ" }]);
-    const relatedId = shownTopicIds.has("dribbling") ? undefined : "dribbling";
-    botDelay(() => {
-      if (relatedId) showTopic(relatedId);
-      append([{
-        role: "assistant",
-        text: "จังหวะดี: รอผู้รับวิ่งเปิดตัวก่อน ดูทิศทาง แล้วค่อยกด อย่าส่งทันทีที่ถือบอล\nคลิปนี้ช่วยเรื่อง spacing ด้วยครับ",
-        knowledgeId: relatedId,
-      }]);
-    }, 600);
-  }
-
-  function handleAskMore() {
-    setChipMode(null);
-    append([{ role: "user", text: "ถามเพิ่ม" }]);
-    botDelay(() => {
-      append([{ role: "assistant", text: "ลองบอกผมหน่อยว่างงตรงไหนครับ" }]);
+      append([{ role: "assistant", text: "บอกผมสั้น ๆ ได้เลยครับว่าติดตรงปุ่ม เมนู จังหวะเล่น หรือการจัดทีม" }]);
       setTimeout(() => composerRef.current?.focus(), 200);
-    }, 500);
+    }, 450);
+  }
+
+  function handleChooseAnother() {
+    setChipMode(null);
+    append([{ role: "user", text: "เลือกเรื่องอื่น" }]);
+    botDelay(() => {
+      if (journeyStage === "activation") openCompetencePrompt();
+      else if (journeyStage === "competence") openCompetencePrompt();
+      else openNextGoalPrompt();
+    }, 450);
+  }
+
+  function handleSocialGoal() {
+    setChipMode(null);
+    append([{ role: "user", text: "เล่นกับเพื่อน" }]);
+    botDelay(() => {
+      append([{
+        role: "assistant",
+        text: "ถ้าอยากหาเพื่อนหรือถามผู้เล่นคนอื่น ผมพาไปชุมชนได้ครับ แต่ไม่จำเป็นต้องเข้า Discord ถ้ายังไม่พร้อม",
+        showDiscord: true,
+      }]);
+    }, 550);
+  }
+
+  function handleOpenQuestion() {
+    setChipMode(null);
+    append([{ role: "user", text: "ยังมีคำถาม" }]);
+    botDelay(() => {
+      append([{ role: "assistant", text: "พิมพ์คำถามได้เลยครับ ถ้าฐานข้อมูลยังไม่มี ผมจะลองถาม AI-INsea หรือส่งให้ทีมเพิ่มข้อมูล" }]);
+      setTimeout(() => composerRef.current?.focus(), 200);
+    }, 450);
   }
 
   // ─ Free-text send ─────────────────────────────────────────────────────────
@@ -1485,7 +1615,21 @@ function CoachScreen({
         setConversationId(result.conversationId);
       }
       setIsTyping(false);
-      append([{ role: "assistant", text: result.answer.trim(), aiSource: "AI-INsea" }]);
+      const actions = Array.isArray(result.actions)
+        ? result.actions.filter((action: unknown): action is ResponseActionId =>
+            action === "education_hub" ||
+            action === "discord" ||
+            action === "customer_support" ||
+            action === "report_question",
+          )
+        : [];
+      append([{
+        role: "assistant",
+        text: result.answer.trim(),
+        aiSource: "AI-INsea",
+        actions,
+        reportQuestion: actions.includes("report_question") ? question : undefined,
+      }]);
     } catch {
       const relatedIds = FALLBACK_RELATED_IDS.filter((id) => !shownTopicIds.has(id)).slice(0, 2);
       relatedIds.forEach((id) => showTopic(id));
@@ -1528,25 +1672,28 @@ function CoachScreen({
   ];
 
   const chipSets: Record<NonNullable<ChipMode>, { label: string; action: () => void }[]> = {
-    diagnose: [
-      { label: "ทำได้แล้ว", action: handleCanDo },
-      { label: "อยากรู้เพิ่ม", action: handleWantMore },
-      { label: "ยังไม่แน่ใจ", action: handleNotSure },
+    activation: [
+      { label: "ยังไม่คุ้นปุ่ม", action: () => presentJourneyContent("ยังไม่คุ้นปุ่ม", "controller") },
+      { label: "ไม่รู้จะเริ่มตรงไหน", action: () => presentJourneyContent("ไม่รู้จะเริ่มตรงไหน", "qss") },
+      { label: "ติดระหว่างแข่ง", action: () => presentJourneyContent("ติดระหว่างแข่ง", "passing") },
+      { label: "เริ่มเล่นได้แล้ว", action: handleActivationReady },
     ],
-    deeper: [
-      { label: "ส่งสั้น", action: handlePassShort },
-      { label: "แทงทะลุช่อง", action: handleThroughBall },
-      { label: "ยังเลือกไม่ถูก", action: handleCantChoose },
+    competence: [
+      { label: "เล่นให้คล่อง", action: () => presentJourneyContent("เล่นให้คล่อง", "passing") },
+      { label: "จัดทีม", action: () => presentJourneyContent("จัดทีม", "qss") },
+      { label: "รางวัลและภารกิจ", action: () => presentJourneyContent("รางวัลและภารกิจ", "mission-hub") },
+      { label: "ยังไม่แน่ใจ", action: handleOpenQuestion },
     ],
-    "post-video": [
-      { label: "เข้าใจแล้ว", action: handleUnderstood },
-      { label: "งงเรื่องปุ่ม", action: handleConfusedButton },
-      { label: "งงเรื่องจังหวะ", action: handleConfusedTiming },
-      { label: "ถามเพิ่ม", action: handleAskMore },
+    "next-goal": [
+      { label: "สร้างทีมให้ดีขึ้น", action: () => presentJourneyContent("สร้างทีมให้ดีขึ้น", "transfer-market") },
+      { label: "หา BP และรางวัล", action: () => presentJourneyContent("หา BP และรางวัล", "mission-hub") },
+      { label: "เล่นกับเพื่อน", action: handleSocialGoal },
+      { label: "ยังมีคำถาม", action: handleOpenQuestion },
     ],
-    "want-tip": [
-      { label: "ได้เลย", action: handleWantTip },
-      { label: "ไม่เป็นไร", action: handleNoTip },
+    "post-content": [
+      { label: "เข้าใจแล้ว", action: handleContentUnderstood },
+      { label: "ยังติดอยู่", action: handleStillStuck },
+      { label: "เลือกเรื่องอื่น", action: handleChooseAnother },
     ],
   };
 
@@ -1721,14 +1868,6 @@ function CoachScreen({
                 return (
                   <div key={msg.id} className="flex justify-start">
                     <div className="max-w-[85%] md:max-w-lg flex flex-col gap-2">
-                      {msg.aiSource && (
-                        <span
-                          className="text-[10px] px-2 py-0.5 rounded-full font-semibold w-fit"
-                          style={{ backgroundColor: "var(--muted)", color: "var(--muted-foreground)" }}
-                        >
-                          {msg.aiSource === "AI-INsea" ? "AI แนะนำ • AI-INsea" : "AI แนะนำ • ยังไม่ได้เชื่อมต่อ"}
-                        </span>
-                      )}
                       {msg.text ? (
                         <div
                           className="px-4 py-2.5 rounded-2xl rounded-tl-sm text-sm"
@@ -1759,12 +1898,51 @@ function CoachScreen({
                       })}
                       {msg.showDiscord && (
                         <a
-                          href="#"
+                          href={DISCORD_URL}
+                          target="_blank"
+                          rel="noopener noreferrer"
                           className="text-xs transition-opacity hover:opacity-60"
                           style={{ color: "var(--muted-foreground)" }}
                         >
                           ยังไม่ตรง? ถามชุมชน FC Online Discord →
                         </a>
+                      )}
+                      {msg.actions?.some((action) => action !== "report_question") && (
+                        <div className="flex flex-wrap gap-2">
+                          {msg.actions.includes("education_hub") && (
+                            <a
+                              href={EDUCATION_HUB_URL}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="text-xs px-3 py-2 rounded-lg border inline-flex items-center gap-1.5 transition-opacity hover:opacity-70"
+                              style={{ borderColor: "var(--border)", color: "var(--foreground)" }}
+                            >
+                              ไป Educational Hub <ExternalLink size={12} aria-hidden />
+                            </a>
+                          )}
+                          {msg.actions.includes("discord") && (
+                            <a
+                              href={DISCORD_URL}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="text-xs px-3 py-2 rounded-lg border inline-flex items-center gap-1.5 transition-opacity hover:opacity-70"
+                              style={{ borderColor: "var(--border)", color: "var(--foreground)" }}
+                            >
+                              เข้า Discord FC Online <ExternalLink size={12} aria-hidden />
+                            </a>
+                          )}
+                          {msg.actions.includes("customer_support") && (
+                            <a
+                              href={CUSTOMER_SUPPORT_URL}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="text-xs px-3 py-2 rounded-lg border inline-flex items-center gap-1.5 transition-opacity hover:opacity-70"
+                              style={{ borderColor: "var(--border)", color: "var(--foreground)" }}
+                            >
+                              ติดต่อ Customer Service <ExternalLink size={12} aria-hidden />
+                            </a>
+                          )}
+                        </div>
                       )}
                       {msg.reportQuestion && (() => {
                         const q = msg.reportQuestion!;
@@ -1933,20 +2111,49 @@ const INITIAL_FLOWS: ContentFlow[] = [
 ];
 
 const INITIAL_DAILY_DELIVERY_PLANS: DailyDeliveryPlan[] = [
-  { id: "ddp-1", day: 1, channel: "chat",         availableTime: "10:00", message: "ยินดีต้อนรับสู่ FCO Rookie Coach! มาเริ่มต้นด้วยการเรียนรู้ปุ่มพื้นฐานกันก่อนเลย ใช้เวลาแค่ 5 นาที", contentId: "FCO-EDU-030", status: "active" },
-  { id: "ddp-2", day: 2, channel: "notification", availableTime: "10:00", message: "วันนี้ฝึกส่งบอลให้ถูกจังหวะ เพียงแค่นี้ก็เล่นได้มั่นใจขึ้นทันที", contentId: "FCO-EDU-043", status: "active" },
-  { id: "ddp-3", day: 3, channel: "chat",         availableTime: "10:00", message: "ลองฝึกดริบบอลผ่านคู่ต่อสู้ เพิ่มโอกาสสร้างโอกาสทำประตูได้มากขึ้น", contentId: "FCO-EDU-045", status: "active" },
-  { id: "ddp-4", day: 4, channel: "notification", availableTime: "10:00", message: "วันนี้เรียนรู้การป้องกันที่แน่น ไม่เสียประตูโดยง่าย ทีมแข็งแกร่งกว่าเดิม", contentId: "FCO-EDU-044", status: "active" },
-  { id: "ddp-5", day: 5, channel: "chat",         availableTime: "10:00", message: "ถึงเวลายิงประตูแล้ว! มาดูเทคนิคการยิงที่ได้ผลจริงในเกม", contentId: "FCO-EDU-001", status: "active" },
-  { id: "ddp-6", day: 6, channel: "notification", availableTime: "10:00", message: "มาทบทวนการส่งบอลระดับสูงเพื่อเปิดเกมรับให้แม่นขึ้นกัน", contentId: "FCO-EDU-007", status: "draft" },
-  { id: "ddp-7", day: 7, channel: "chat",         availableTime: "10:00", message: "พร้อมลงสนามแล้ว มาฝึก Quick Shot ให้ชำนาญยิ่งขึ้นกัน", contentId: "FCO-EDU-041", status: "draft" },
+  {
+    id: "pm-1", day: 1, stageId: "activation", name: "Find the first blocker", channel: "chat",
+    trigger: "segment_selected", triggerDetail: "หลังเลือก เพิ่งเริ่มเล่น หรือ เพิ่งกลับมาเล่น",
+    message: "ตอนนี้ส่วนไหนของเกมที่ยังติดอยู่?", responseOptions: ["ยังไม่คุ้นปุ่ม", "ไม่รู้จะเริ่มตรงไหน", "ติดระหว่างแข่ง", "เริ่มเล่นได้แล้ว"],
+    nextAction: "เลือกคำแนะนำตาม blocker", successEvent: "player_selected_first_blocker", fallback: "เปิดช่องพิมพ์คำถาม", status: "active",
+  },
+  {
+    id: "pm-2", day: 1, stageId: "activation", name: "Return with an unresolved blocker", channel: "notification",
+    trigger: "unresolved_return", triggerDetail: "กลับเข้าเว็บและยังไม่มี success event ของ Activation",
+    message: "ยังติดเรื่องเดิมอยู่ไหม? กลับมาถามโค้ชต่อได้เลย", responseOptions: ["ถามต่อ", "เลือกเรื่องใหม่"],
+    nextAction: "กลับเข้าบทสนทนาล่าสุด", successEvent: "player_resumed_help", fallback: "ไม่ส่งซ้ำภายใน 24 ชั่วโมง", status: "active",
+  },
+  {
+    id: "pm-3", day: 2, stageId: "competence", name: "Choose one improvement goal", channel: "chat",
+    trigger: "after_response", triggerDetail: "หลังผู้เล่นผ่าน Activation หรือบอกว่าเริ่มเล่นได้แล้ว",
+    message: "ตอนนี้อยากพัฒนาเรื่องไหนให้เล่นได้มั่นใจขึ้น?", responseOptions: ["เล่นให้คล่อง", "จัดทีม", "รางวัลและภารกิจ", "ยังไม่แน่ใจ"],
+    nextAction: "ส่ง content ที่ตรงกับเป้าหมาย", successEvent: "player_selected_improvement_goal", fallback: "ถามให้ผู้เล่นอธิบายสิ่งที่ติด", status: "active",
+  },
+  {
+    id: "pm-4", day: 2, stageId: "competence", name: "Check understanding after content", channel: "chat",
+    trigger: "content_completed", triggerDetail: "หลังเปิดวิดีโอหรือคำแนะนำจากฐานข้อมูล",
+    message: "ดูแล้วเป็นอย่างไรบ้าง?", responseOptions: ["เข้าใจแล้ว", "ยังติดอยู่", "เลือกเรื่องอื่น"],
+    nextAction: "ถามจุดที่ยังติด หรือไปเป้าหมายถัดไป", successEvent: "player_completed_content_followup", fallback: "AI-INsea แล้วเก็บ unanswered question", status: "active",
+  },
+  {
+    id: "pm-5", day: 3, stageId: "next-goal", name: "Set a reason to return", channel: "notification",
+    trigger: "session_start", triggerDetail: "เปิดเว็บในช่วง Next goal และยังไม่ได้เลือกเป้าหมาย",
+    message: "เป้าหมายต่อไปของคุณคืออะไร?", responseOptions: ["สร้างทีมให้ดีขึ้น", "หา BP และรางวัล", "เล่นกับเพื่อน", "ยังมีคำถาม"],
+    nextAction: "พาไป content หรือช่องทางที่เหมาะสม", successEvent: "player_selected_next_goal", fallback: "เปิด FAQ และช่องพิมพ์", status: "active",
+  },
+  {
+    id: "pm-6", day: 3, stageId: "next-goal", name: "Route to the right next channel", channel: "chat",
+    trigger: "before_handoff", triggerDetail: "หลังเลือก next goal หรือคำถามเกินฐานความรู้",
+    message: "อยากไปต่อด้วย Educational Hub, ชุมชน หรือให้ทีมช่วยเพิ่มคำตอบ?", responseOptions: ["Educational Hub", "Discord", "รายงานคำถาม"],
+    nextAction: "ส่งต่อโดยไม่บังคับเข้า Discord", successEvent: "player_completed_handoff", fallback: "เก็บคำถามและแสดงสถานะรับเรื่อง", status: "draft",
+  },
 ];
 
 const INITIAL_REPORTED_QUESTIONS: ReportedQuestion[] = [
   {
     id: "rq-1",
     question: "วิธีเพิ่มพลังยิงทำยังไง",
-    onboardingDay: 5,
+    onboardingDay: 2,
     relatedTopicId: "FCO-EDU-001",
     count: 4,
     firstSeen: "2026-08-25",
@@ -1967,7 +2174,7 @@ const INITIAL_REPORTED_QUESTIONS: ReportedQuestion[] = [
   {
     id: "rq-3",
     question: "ซื้อผู้เล่นจาก Transfer Market ยังไง",
-    onboardingDay: 6,
+    onboardingDay: 3,
     count: 7,
     firstSeen: "2026-08-20",
     lastSeen: "2026-08-28",
@@ -1976,64 +2183,172 @@ const INITIAL_REPORTED_QUESTIONS: ReportedQuestion[] = [
   },
 ];
 
-// ── AdminDailyDeliveryPlan ─────────────────────────────────────────────────────
+const FAQ_CONFIG = [
+  { question: "ส่งบอลยังไง", stageId: "activation" as JourneyStageId, topicId: "FCO-EDU-043", trigger: "ส่งบอล, จ่ายบอล, passing" },
+  { question: "เล่นเกมรับยังไง", stageId: "competence" as JourneyStageId, topicId: "FCO-EDU-044", trigger: "เกมรับ, ป้องกัน, เข้าสกัด" },
+  { question: "ยิงยังไงให้คม", stageId: "competence" as JourneyStageId, topicId: "FCO-EDU-001", trigger: "ยิง, จบสกอร์, shooting" },
+  { question: "เชื่อมจอยยังไง", stageId: "activation" as JourneyStageId, topicId: "FCO-EDU-030", trigger: "จอย, controller, ตั้งค่าจอย" },
+  { question: "หา BP และรางวัลยังไง", stageId: "next-goal" as JourneyStageId, topicId: "FCO-EDU-018", trigger: "BP, เงิน, รางวัล, ภารกิจ" },
+];
 
-function AdminDailyDeliveryPlan({
+function AdminOverview({ plans, reportedQuestions }: { plans: DailyDeliveryPlan[]; reportedQuestions: ReportedQuestion[] }) {
+  const activeMessages = plans.filter((p) => p.status === "active").length;
+  const openQuestions = reportedQuestions.filter((q) => q.status === "new" || q.status === "reviewing").length;
+  const userMetrics = [
+    { label: "Total users", value: "1,284", note: "ผู้ใช้ทั้งหมดใน prototype" },
+    { label: "Guided users", value: "814", note: "ผู้เล่นใหม่ + กลับมาเล่น · 63.4%" },
+    { label: "Current players", value: "470", note: "ส่งต่อไป Hub / Discord · 36.6%" },
+    { label: "Active users · 7d", value: "642", note: "กลับมาใช้งานใน 7 วันล่าสุด" },
+  ];
+  const keyStats = [
+    { label: "Started chat", count: "596", rate: "73.2%", note: "ของ guided users" },
+    { label: "Answered by knowledge", count: "489", rate: "82.0%", note: "ของผู้ที่เริ่มแชท" },
+    { label: "AI fallback", count: "72", rate: "12.1%", note: "คำถามที่ต้องใช้ AI-INsea" },
+    { label: "Unanswered", count: "35", rate: "5.9%", note: "ต้องเพิ่มข้อมูลหรือให้ทีมตอบ" },
+    { label: "Content opened", count: "302", rate: "50.7%", note: "เปิดวิดีโอหรือคำแนะนำ" },
+    { label: "Hub / Discord clicks", count: "252", rate: "42.3%", note: "คลิกไปช่องทางถัดไป" },
+  ];
+
+  return (
+    <div className="flex-1 overflow-y-auto p-6 max-w-6xl">
+      <div className="mb-5 flex items-start justify-between gap-4">
+        <div>
+          <h2 className="text-base font-semibold" style={{ color: "var(--foreground)" }}>Overview</h2>
+          <p className="text-xs mt-1" style={{ color: "var(--muted-foreground)" }}>User volume, engagement and answer quality</p>
+        </div>
+        <div className="text-right">
+          <span className="text-[10px] px-2 py-1 rounded-full font-semibold" style={{ backgroundColor: "var(--muted)", color: "var(--muted-foreground)" }}>Demo data</span>
+          <p className="text-[10px] mt-1" style={{ color: "var(--muted-foreground)" }}>Last 7 days · analytics connection pending</p>
+        </div>
+      </div>
+
+      <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-3 mb-6">
+        {userMetrics.map((metric) => (
+          <div key={metric.label} className="rounded-xl border p-4" style={{ borderColor: "var(--border)", backgroundColor: "var(--card)" }}>
+            <p className="text-[10px] uppercase tracking-wider font-semibold" style={{ color: "var(--muted-foreground)" }}>{metric.label}</p>
+            <p className="text-2xl font-bold mt-2" style={{ color: "var(--foreground)" }}>{metric.value}</p>
+            <p className="text-xs mt-1" style={{ color: "var(--muted-foreground)" }}>{metric.note}</p>
+          </div>
+        ))}
+      </div>
+
+      <div className="rounded-xl border overflow-hidden" style={{ borderColor: "var(--border)" }}>
+        <div className="px-4 py-3 flex items-center justify-between gap-3" style={{ backgroundColor: "var(--muted)", borderBottom: "1px solid var(--border)" }}>
+          <div>
+            <p className="text-sm font-semibold" style={{ color: "var(--foreground)" }}>Key stats</p>
+            <p className="text-xs mt-0.5" style={{ color: "var(--muted-foreground)" }}>Metrics needed to evaluate the MVP</p>
+          </div>
+          <div className="text-[10px]" style={{ color: "var(--muted-foreground)" }}>
+            {activeMessages} active messages · {openQuestions} open questions
+          </div>
+        </div>
+        <div>
+          {keyStats.map((stat, index) => (
+            <div key={stat.label} className="grid items-center px-4 py-3 text-xs" style={{ gridTemplateColumns: "1fr 90px 90px 1.2fr", borderTop: index === 0 ? undefined : "1px solid var(--border)" }}>
+              <span className="font-medium" style={{ color: "var(--foreground)" }}>{stat.label}</span>
+              <span className="font-semibold" style={{ color: "var(--foreground)" }}>{stat.count}</span>
+              <span className="font-semibold" style={{ color: stat.label === "Unanswered" ? "var(--primary)" : "var(--accent)" }}>{stat.rate}</span>
+              <span style={{ color: "var(--muted-foreground)" }}>{stat.note}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── AdminProactiveMessages ─────────────────────────────────────────────────────
+
+function AdminProactiveMessages({
   plans,
   setPlans,
 }: {
   plans: DailyDeliveryPlan[];
   setPlans: (fn: (prev: DailyDeliveryPlan[]) => DailyDeliveryPlan[]) => void;
 }) {
-  const [editingDay, setEditingDay] = useState<DeliveryDay | null>(null);
+  const [stageFilter, setStageFilter] = useState<JourneyStageId | "all">("all");
+  const [editingId, setEditingId] = useState<string | null>(null);
 
-  function patch(day: DeliveryDay, update: Partial<DailyDeliveryPlan>) {
-    setPlans((prev) => prev.map((p) => (p.day === day ? { ...p, ...update } : p)));
+  function patch(id: string, update: Partial<DailyDeliveryPlan>) {
+    setPlans((prev) => prev.map((p) => (p.id === id ? { ...p, ...update } : p)));
   }
 
+  const visiblePlans = stageFilter === "all" ? plans : plans.filter((p) => p.stageId === stageFilter);
   const inputCls = "h-9 px-3 rounded-md text-sm w-full";
   const inputStyle = { border: "1px solid var(--border)", backgroundColor: "var(--card)", color: "var(--foreground)", outline: "none" as const };
-
   const CHANNEL_LABELS: Record<DeliveryChannel, string> = { notification: "Notification", chat: "Chat" };
+  const TRIGGER_LABELS: Record<DeliveryTrigger, string> = {
+    segment_selected: "Segment selected",
+    session_start: "Session start",
+    after_response: "After response",
+    content_completed: "Content completed",
+    unresolved_return: "Unresolved return",
+    before_handoff: "Before handoff",
+  };
 
   return (
-    <div className="flex-1 overflow-y-auto p-6 flex flex-col gap-5 max-w-2xl">
-      <div className="flex flex-col gap-1">
-        <h2 className="text-base font-semibold" style={{ color: "var(--foreground)" }}>Daily Delivery Plan</h2>
-        <div
-          className="flex items-center gap-2 px-3 py-2 rounded-md text-xs font-medium w-fit"
-          style={{ backgroundColor: "rgba(196,30,30,0.07)", color: "var(--primary)" }}
-        >
-          <span>⏱</span>
-          ส่งครั้งแรกเมื่อผู้ใช้เปิดแอปหลังเวลาที่กำหนด
+    <div className="flex-1 overflow-y-auto p-6 flex flex-col gap-5 max-w-5xl">
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <h2 className="text-base font-semibold" style={{ color: "var(--foreground)" }}>Proactive Messages</h2>
+          <p className="text-xs mt-1" style={{ color: "var(--muted-foreground)" }}>
+            Bot-initiated messages driven by player behavior, not a once-per-day schedule
+          </p>
         </div>
+        <button
+          className="h-9 px-4 rounded-lg text-xs font-semibold"
+          style={{ backgroundColor: "var(--primary)", color: "var(--primary-foreground)" }}
+          onClick={() => {
+            const stage = stageFilter === "all" ? "activation" : stageFilter;
+            const day = JOURNEY_STAGES.find((s) => s.id === stage)?.day ?? 1;
+            const id = uid();
+            setPlans((prev) => [...prev, {
+              id, day, stageId: stage, name: "New proactive message", channel: "chat", trigger: "after_response",
+              triggerDetail: "กำหนดเงื่อนไขการส่ง", message: "", responseOptions: [], nextAction: "",
+              successEvent: "", fallback: "เปิดช่องพิมพ์คำถาม", status: "draft",
+            }]);
+            setEditingId(id);
+          }}
+        >
+          + เพิ่มข้อความ
+        </button>
+      </div>
+
+      <div className="flex flex-wrap gap-2">
+        {(["all", "activation", "competence", "next-goal"] as const).map((value) => (
+          <button
+            key={value}
+            onClick={() => setStageFilter(value)}
+            className="h-8 px-3 rounded-full text-xs font-medium border"
+            style={{
+              borderColor: stageFilter === value ? "var(--primary)" : "var(--border)",
+              color: stageFilter === value ? "var(--primary)" : "var(--muted-foreground)",
+              backgroundColor: stageFilter === value ? "rgba(196,30,30,0.05)" : "transparent",
+            }}
+          >
+            {value === "all" ? "All stages" : JOURNEY_STAGES.find((s) => s.id === value)?.title}
+          </button>
+        ))}
       </div>
 
       <div className="flex flex-col gap-2">
-        {plans.map((plan) => {
-          const isEditing = editingDay === plan.day;
+        {visiblePlans.map((plan) => {
+          const isEditing = editingId === plan.id;
           const linkedTopic = plan.contentId ? KNOWLEDGE.find((k) => k.topicId === plan.contentId) : undefined;
+          const stage = JOURNEY_STAGES.find((s) => s.id === plan.stageId);
 
           return (
             <div
-              key={plan.day}
+              key={plan.id}
               className="rounded-xl overflow-hidden"
               style={{ border: `1px solid ${isEditing ? "var(--primary)" : "var(--border)"}` }}
             >
-              {/* Summary row */}
               <button
-                onClick={() => setEditingDay(isEditing ? null : plan.day)}
+                onClick={() => setEditingId(isEditing ? null : plan.id)}
                 className="w-full flex items-center gap-3 px-4 py-3 text-left transition-colors"
                 style={{ backgroundColor: isEditing ? "rgba(196,30,30,0.04)" : "var(--card)" }}
-                onMouseEnter={(e) => { if (!isEditing) e.currentTarget.style.backgroundColor = "var(--muted)"; }}
-                onMouseLeave={(e) => { if (!isEditing) e.currentTarget.style.backgroundColor = "var(--card)"; }}
               >
-                <span
-                  className="text-xs font-bold w-14 shrink-0"
-                  style={{ color: "var(--primary)" }}
-                >
-                  Day {plan.day}
-                </span>
+                <span className="text-xs font-bold w-24 shrink-0" style={{ color: "var(--primary)" }}>{stage?.title}</span>
                 <span
                   className="text-[10px] px-2 py-0.5 rounded-full font-semibold shrink-0"
                   style={{
@@ -2043,8 +2358,13 @@ function AdminDailyDeliveryPlan({
                 >
                   {CHANNEL_LABELS[plan.channel]}
                 </span>
-                <span className="text-xs shrink-0" style={{ color: "var(--muted-foreground)" }}>{plan.availableTime}</span>
-                <span className="text-xs flex-1 truncate" style={{ color: "var(--foreground)" }}>{plan.message}</span>
+                <span className="text-[10px] px-2 py-0.5 rounded-full shrink-0" style={{ backgroundColor: "var(--muted)", color: "var(--muted-foreground)" }}>
+                  {TRIGGER_LABELS[plan.trigger]}
+                </span>
+                <span className="text-xs flex-1 min-w-0">
+                  <span className="block font-semibold truncate" style={{ color: "var(--foreground)" }}>{plan.name}</span>
+                  <span className="block truncate mt-0.5" style={{ color: "var(--muted-foreground)" }}>{plan.message || "ยังไม่มีข้อความ"}</span>
+                </span>
                 <span
                   className="text-[10px] px-2 py-0.5 rounded-full font-semibold shrink-0"
                   style={{
@@ -2056,18 +2376,26 @@ function AdminDailyDeliveryPlan({
                 </span>
               </button>
 
-              {/* Edit panel */}
               {isEditing && (
                 <div
                   className="flex flex-col gap-4 px-4 py-4"
                   style={{ borderTop: "1px solid var(--border)", backgroundColor: "var(--background)" }}
                 >
-                  <div className="grid gap-4" style={{ gridTemplateColumns: "1fr 1fr" }}>
+                  <div className="grid md:grid-cols-3 gap-4">
+                    <div className="flex flex-col gap-1.5">
+                      <label className="text-xs font-medium" style={{ color: "var(--muted-foreground)" }}>Stage</label>
+                      <select value={plan.stageId} onChange={(e) => {
+                        const nextStage = e.target.value as JourneyStageId;
+                        patch(plan.id, { stageId: nextStage, day: JOURNEY_STAGES.find((s) => s.id === nextStage)?.day ?? 1 });
+                      }} className={inputCls} style={inputStyle}>
+                        {JOURNEY_STAGES.map((s) => <option key={s.id} value={s.id}>{s.title}</option>)}
+                      </select>
+                    </div>
                     <div className="flex flex-col gap-1.5">
                       <label className="text-xs font-medium" style={{ color: "var(--muted-foreground)" }}>Channel</label>
                       <select
                         value={plan.channel}
-                        onChange={(e) => patch(plan.day, { channel: e.target.value as DeliveryChannel })}
+                        onChange={(e) => patch(plan.id, { channel: e.target.value as DeliveryChannel })}
                         className={inputCls}
                         style={inputStyle}
                       >
@@ -2076,14 +2404,21 @@ function AdminDailyDeliveryPlan({
                       </select>
                     </div>
                     <div className="flex flex-col gap-1.5">
-                      <label className="text-xs font-medium" style={{ color: "var(--muted-foreground)" }}>Available time</label>
-                      <input
-                        type="time"
-                        value={plan.availableTime}
-                        onChange={(e) => patch(plan.day, { availableTime: e.target.value })}
-                        className="h-9 px-3 rounded-md text-sm"
-                        style={inputStyle}
-                      />
+                      <label className="text-xs font-medium" style={{ color: "var(--muted-foreground)" }}>Trigger</label>
+                      <select value={plan.trigger} onChange={(e) => patch(plan.id, { trigger: e.target.value as DeliveryTrigger })} className={inputCls} style={inputStyle}>
+                        {Object.entries(TRIGGER_LABELS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+                      </select>
+                    </div>
+                  </div>
+
+                  <div className="grid md:grid-cols-2 gap-4">
+                    <div className="flex flex-col gap-1.5">
+                      <label className="text-xs font-medium" style={{ color: "var(--muted-foreground)" }}>Message name</label>
+                      <input value={plan.name} onChange={(e) => patch(plan.id, { name: e.target.value })} className={inputCls} style={inputStyle} />
+                    </div>
+                    <div className="flex flex-col gap-1.5">
+                      <label className="text-xs font-medium" style={{ color: "var(--muted-foreground)" }}>Trigger detail</label>
+                      <input value={plan.triggerDetail} onChange={(e) => patch(plan.id, { triggerDetail: e.target.value })} className={inputCls} style={inputStyle} />
                     </div>
                   </div>
 
@@ -2091,18 +2426,37 @@ function AdminDailyDeliveryPlan({
                     <label className="text-xs font-medium" style={{ color: "var(--muted-foreground)" }}>Message</label>
                     <textarea
                       value={plan.message}
-                      onChange={(e) => patch(plan.day, { message: e.target.value })}
+                      onChange={(e) => patch(plan.id, { message: e.target.value })}
                       rows={2}
                       className="px-3 py-2 rounded-md text-sm resize-none"
                       style={{ ...inputStyle, lineHeight: "1.6" }}
                     />
                   </div>
 
+                  <div className="grid md:grid-cols-2 gap-4">
+                    <div className="flex flex-col gap-1.5">
+                      <label className="text-xs font-medium" style={{ color: "var(--muted-foreground)" }}>Response options</label>
+                      <input value={plan.responseOptions.join(" • ")} onChange={(e) => patch(plan.id, { responseOptions: e.target.value.split("•").map((v) => v.trim()).filter(Boolean) })} className={inputCls} style={inputStyle} />
+                    </div>
+                    <div className="flex flex-col gap-1.5">
+                      <label className="text-xs font-medium" style={{ color: "var(--muted-foreground)" }}>Next action</label>
+                      <input value={plan.nextAction} onChange={(e) => patch(plan.id, { nextAction: e.target.value })} className={inputCls} style={inputStyle} />
+                    </div>
+                    <div className="flex flex-col gap-1.5">
+                      <label className="text-xs font-medium" style={{ color: "var(--muted-foreground)" }}>Success event</label>
+                      <input value={plan.successEvent} onChange={(e) => patch(plan.id, { successEvent: e.target.value })} className={inputCls} style={inputStyle} />
+                    </div>
+                    <div className="flex flex-col gap-1.5">
+                      <label className="text-xs font-medium" style={{ color: "var(--muted-foreground)" }}>Fallback</label>
+                      <input value={plan.fallback} onChange={(e) => patch(plan.id, { fallback: e.target.value })} className={inputCls} style={inputStyle} />
+                    </div>
+                  </div>
+
                   <div className="flex flex-col gap-1.5">
                     <label className="text-xs font-medium" style={{ color: "var(--muted-foreground)" }}>Linked content</label>
                     <select
                       value={plan.contentId ?? ""}
-                      onChange={(e) => patch(plan.day, { contentId: e.target.value || undefined })}
+                      onChange={(e) => patch(plan.id, { contentId: e.target.value || undefined })}
                       className={inputCls}
                       style={inputStyle}
                     >
@@ -2119,7 +2473,7 @@ function AdminDailyDeliveryPlan({
                   <div className="flex items-center justify-between">
                     <div className="flex gap-2">
                       <button
-                        onClick={() => patch(plan.day, { status: "draft" })}
+                        onClick={() => patch(plan.id, { status: "draft" })}
                         className="h-8 px-3 rounded-lg text-xs font-medium border transition-colors"
                         style={{ borderColor: "var(--border)", color: "var(--foreground)", backgroundColor: "transparent" }}
                         onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = "var(--muted)")}
@@ -2128,7 +2482,7 @@ function AdminDailyDeliveryPlan({
                         บันทึกแบบร่าง
                       </button>
                       <button
-                        onClick={() => { patch(plan.day, { status: "active" }); setEditingDay(null); }}
+                        onClick={() => { patch(plan.id, { status: "active" }); setEditingId(null); }}
                         className="h-8 px-3 rounded-lg text-xs font-semibold transition-opacity hover:opacity-80"
                         style={{ backgroundColor: "var(--primary)", color: "var(--primary-foreground)" }}
                       >
@@ -2136,7 +2490,7 @@ function AdminDailyDeliveryPlan({
                       </button>
                     </div>
                     <button
-                      onClick={() => setEditingDay(null)}
+                      onClick={() => setEditingId(null)}
                       className="text-xs transition-opacity hover:opacity-60"
                       style={{ color: "var(--muted-foreground)" }}
                     >
@@ -2151,7 +2505,7 @@ function AdminDailyDeliveryPlan({
       </div>
 
       <p className="text-[10px]" style={{ color: "var(--muted-foreground)" }}>
-        Prototype ใช้ local mock · production เชื่อม DailyDeliveryPlan + KnowledgeItem ผ่าน contentId
+        MVP ใช้ local mock · Supabase publish/version history ยังพักไว้ตาม scope ปัจจุบัน
       </p>
     </div>
   );
@@ -2162,6 +2516,7 @@ function AdminDailyDeliveryPlan({
 function AdminContentLibrary() {
   const [search, setSearch] = useState("");
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [faqs, setFaqs] = useState(FAQ_CONFIG);
 
   const filtered = KNOWLEDGE.filter(
     (k) =>
@@ -2176,8 +2531,43 @@ function AdminContentLibrary() {
     <div className="flex-1 overflow-hidden flex">
       {/* Table pane */}
       <div className="flex flex-col overflow-hidden" style={{ width: selected ? "55%" : "100%" }}>
-        {/* Search */}
-        <div className="px-5 pt-5 pb-3 shrink-0">
+        <div className="px-5 pt-5 pb-3 shrink-0 flex flex-col gap-4">
+          <div>
+            <h2 className="text-base font-semibold" style={{ color: "var(--foreground)" }}>FAQ &amp; Content</h2>
+            <p className="text-xs mt-1" style={{ color: "var(--muted-foreground)" }}>Set common questions and link every answer to a verified knowledge topic</p>
+          </div>
+
+          <div className="grid md:grid-cols-2 gap-2">
+            {faqs.map((faq, index) => {
+              const topic = KNOWLEDGE.find((k) => k.topicId === faq.topicId);
+              return (
+                <div key={`${faq.question}-${index}`} className="rounded-lg border p-3" style={{ borderColor: "var(--border)", backgroundColor: "var(--card)" }}>
+                  <div className="flex items-start gap-2">
+                    <input
+                      value={faq.question}
+                      onChange={(e) => setFaqs((prev) => prev.map((item, i) => i === index ? { ...item, question: e.target.value } : item))}
+                      className="flex-1 bg-transparent text-xs font-semibold outline-none min-w-0"
+                      style={{ color: "var(--foreground)" }}
+                    />
+                    <span className="text-[10px] px-2 py-0.5 rounded-full shrink-0" style={{ backgroundColor: "var(--muted)", color: "var(--muted-foreground)" }}>
+                      {JOURNEY_STAGES.find((s) => s.id === faq.stageId)?.title}
+                    </span>
+                  </div>
+                  <select
+                    value={faq.topicId}
+                    onChange={(e) => setFaqs((prev) => prev.map((item, i) => i === index ? { ...item, topicId: e.target.value } : item))}
+                    className="w-full mt-2 h-8 px-2 rounded-md text-[11px]"
+                    style={{ border: "1px solid var(--border)", backgroundColor: "var(--background)", color: "var(--foreground)" }}
+                  >
+                    {KNOWLEDGE.map((k) => <option key={k.topicId} value={k.topicId}>{k.topicId} · {k.title}</option>)}
+                  </select>
+                  <p className="text-[10px] mt-1 truncate" style={{ color: "var(--muted-foreground)" }}>{faq.trigger}</p>
+                  {topic ? <p className="text-[10px] mt-1 truncate" style={{ color: "var(--primary)" }}>{topic.title}</p> : null}
+                </div>
+              );
+            })}
+          </div>
+
           <div className="relative">
             <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2" style={{ color: "var(--muted-foreground)" }} aria-hidden />
             <input
@@ -2556,7 +2946,9 @@ function AdminPreview({ deliveryPlans }: { deliveryPlans: DailyDeliveryPlan[] })
   const [previewDay, setPreviewDay] = useState<DeliveryDay>(1);
   const [previewChannel, setPreviewChannel] = useState<DeliveryChannel>("notification");
 
-  const plan = deliveryPlans.find((p) => p.day === previewDay) ?? deliveryPlans[0];
+  const plan = deliveryPlans.find((p) => p.day === previewDay && p.channel === previewChannel)
+    ?? deliveryPlans.find((p) => p.day === previewDay)
+    ?? deliveryPlans[0];
   const linkedTopic = plan.contentId ? KNOWLEDGE.find((k) => k.topicId === plan.contentId) : undefined;
 
   return (
@@ -2570,7 +2962,7 @@ function AdminPreview({ deliveryPlans }: { deliveryPlans: DailyDeliveryPlan[] })
 
         {/* Day selector */}
         <div className="flex rounded-lg overflow-hidden" style={{ border: "1px solid var(--border)" }}>
-          {([1, 2, 3, 4, 5, 6, 7] as DeliveryDay[]).map((d) => {
+          {([1, 2, 3] as DeliveryDay[]).map((d) => {
             const active = d === previewDay;
             return (
               <button
@@ -2580,7 +2972,7 @@ function AdminPreview({ deliveryPlans }: { deliveryPlans: DailyDeliveryPlan[] })
                 style={{
                   backgroundColor: active ? "var(--foreground)" : "transparent",
                   color: active ? "var(--background)" : "var(--muted-foreground)",
-                  borderRight: d < 7 ? "1px solid var(--border)" : undefined,
+                  borderRight: d < 3 ? "1px solid var(--border)" : undefined,
                 }}
                 onMouseEnter={(e) => { if (!active) e.currentTarget.style.backgroundColor = "var(--muted)"; }}
                 onMouseLeave={(e) => { if (!active) e.currentTarget.style.backgroundColor = "transparent"; }}
@@ -2615,7 +3007,7 @@ function AdminPreview({ deliveryPlans }: { deliveryPlans: DailyDeliveryPlan[] })
         </div>
 
         <span className="text-xs ml-auto" style={{ color: "var(--muted-foreground)" }}>
-          ส่งครั้งแรกเมื่อผู้ใช้เปิดแอปหลังเวลาที่กำหนด
+          Internal preview only · ผู้เล่นไม่เห็น Day
         </span>
       </div>
 
@@ -2627,7 +3019,7 @@ function AdminPreview({ deliveryPlans }: { deliveryPlans: DailyDeliveryPlan[] })
           style={{ borderRight: "1px solid var(--border)" }}
         >
           <p className="text-[11px] font-semibold uppercase tracking-wider" style={{ color: "var(--muted-foreground)" }}>
-            Plan Config
+            Delivery Rule
           </p>
           <div className="flex flex-col gap-3 text-xs">
             <div>
@@ -2639,8 +3031,9 @@ function AdminPreview({ deliveryPlans }: { deliveryPlans: DailyDeliveryPlan[] })
               <p className="mt-0.5 capitalize" style={{ color: "var(--foreground)" }}>{plan.channel}</p>
             </div>
             <div>
-              <p className="font-medium" style={{ color: "var(--muted-foreground)" }}>Available time</p>
-              <p className="mt-0.5" style={{ color: "var(--foreground)" }}>{plan.availableTime}</p>
+              <p className="font-medium" style={{ color: "var(--muted-foreground)" }}>Trigger</p>
+              <p className="mt-0.5" style={{ color: "var(--foreground)" }}>{plan.trigger.replace(/_/g, " ")}</p>
+              <p className="mt-1 leading-relaxed" style={{ color: "var(--muted-foreground)" }}>{plan.triggerDetail}</p>
             </div>
             <div>
               <p className="font-medium" style={{ color: "var(--muted-foreground)" }}>Message</p>
@@ -2692,7 +3085,7 @@ function AdminPreview({ deliveryPlans }: { deliveryPlans: DailyDeliveryPlan[] })
                         FCO Rookie Coach
                       </span>
                       <span className="text-[11px] shrink-0" style={{ color: "var(--muted-foreground)" }}>
-                        {plan.availableTime}
+                        Trigger: {plan.trigger.replace(/_/g, " ")}
                       </span>
                     </div>
                     <p className="text-xs mt-1 leading-relaxed" style={{ color: "var(--muted-foreground)" }}>{plan.message}</p>
@@ -3031,18 +3424,17 @@ function AdminView({
   reportedQuestions: ReportedQuestion[];
   setReportedQuestions: (fn: (prev: ReportedQuestion[]) => ReportedQuestion[]) => void;
 }) {
-  const [tab, setTab] = useState<AdminTab>("daily-delivery");
+  const [tab, setTab] = useState<AdminTab>("overview");
   const [deliveryPlans, setDeliveryPlans] = useState<DailyDeliveryPlan[]>(INITIAL_DAILY_DELIVERY_PLANS);
-  const [flows, setFlows] = useState<ContentFlow[]>(INITIAL_FLOWS);
 
   const newCount = reportedQuestions.filter((q) => q.status === "new").length;
 
   const navItems: { key: AdminTab; label: string; icon: React.ReactNode; badge?: number }[] = [
-    { key: "daily-delivery", label: "Daily Delivery Plan", icon: <Calendar size={15} aria-hidden /> },
-    { key: "content-library", label: "Content Library", icon: <BookOpen size={15} aria-hidden /> },
-    { key: "content-flows", label: "Content Flows", icon: <GitBranch size={15} aria-hidden /> },
+    { key: "overview", label: "Overview", icon: <Eye size={15} aria-hidden /> },
+    { key: "proactive-messages", label: "Proactive Messages", icon: <MessageCircle size={15} aria-hidden /> },
+    { key: "faq-content", label: "FAQ & Content", icon: <BookOpen size={15} aria-hidden /> },
     { key: "unanswered", label: "Unanswered Questions", icon: <Search size={15} aria-hidden />, badge: newCount },
-    { key: "preview", label: "Preview", icon: <Eye size={15} aria-hidden /> },
+    { key: "preview", label: "Preview", icon: <GitBranch size={15} aria-hidden /> },
   ];
 
   return (
@@ -3101,9 +3493,9 @@ function AdminView({
 
       {/* Content area */}
       <main className="flex-1 overflow-hidden flex">
-        {tab === "daily-delivery" && <AdminDailyDeliveryPlan plans={deliveryPlans} setPlans={setDeliveryPlans} />}
-        {tab === "content-library" && <AdminContentLibrary />}
-        {tab === "content-flows" && <AdminContentFlows flows={flows} setFlows={setFlows} />}
+        {tab === "overview" && <AdminOverview plans={deliveryPlans} reportedQuestions={reportedQuestions} />}
+        {tab === "proactive-messages" && <AdminProactiveMessages plans={deliveryPlans} setPlans={setDeliveryPlans} />}
+        {tab === "faq-content" && <AdminContentLibrary />}
         {tab === "unanswered" && <AdminUnansweredQuestions questions={reportedQuestions} setQuestions={setReportedQuestions} />}
         {tab === "preview" && <AdminPreview deliveryPlans={deliveryPlans} />}
       </main>
@@ -3112,10 +3504,12 @@ function AdminView({
 }
 
 function AdminRoute() {
-  const [session, setSession] = useState<AdminSessionState>("checking");
+  const devPreview = import.meta.env.DEV && new URLSearchParams(window.location.search).get("preview") === "1";
+  const [session, setSession] = useState<AdminSessionState>(devPreview ? "authenticated" : "checking");
   const [reportedQuestions, setReportedQuestions] = useState<ReportedQuestion[]>(INITIAL_REPORTED_QUESTIONS);
 
   useEffect(() => {
+    if (devPreview) return;
     let active = true;
     fetch("/api/admin/session", { cache: "no-store" })
       .then(async (response) => {
@@ -3130,7 +3524,7 @@ function AdminRoute() {
         if (active) setSession("signed-out");
       });
     return () => { active = false; };
-  }, []);
+  }, [devPreview]);
 
   async function logout() {
     await fetch("/api/admin/logout", { method: "POST" }).catch(() => undefined);
@@ -3174,6 +3568,7 @@ function AdminRoute() {
 
 export default function App() {
   const [role, setRole] = useState<Role | null>(null);
+  const [segment, setSegment] = useState<PlayerSegment | null>(null);
   const [reportedQuestions, setReportedQuestions] = useState<ReportedQuestion[]>(INITIAL_REPORTED_QUESTIONS);
 
   const isAdminRoute = window.location.pathname === "/admin" || window.location.pathname.startsWith("/admin/");
@@ -3205,7 +3600,29 @@ export default function App() {
 
   if (isAdminRoute) return <AdminRoute />;
 
-  if (role === null) return <LoginScreen onLogin={() => setRole("player")} />;
+  if (role === null) {
+    return <LoginScreen onLogin={() => {
+      setRole("player");
+      setSegment(null);
+    }} />;
+  }
 
-  return <CoachScreen onLogout={() => setRole(null)} onReportQuestion={handleReportQuestion} />;
+  if (segment === null) {
+    return <PlayerSegmentScreen onSelect={setSegment} />;
+  }
+
+  if (segment === "experienced") {
+    return <ExperiencedPlayerScreen onBack={() => setSegment(null)} />;
+  }
+
+  return (
+    <CoachScreen
+      segment={segment}
+      onLogout={() => {
+        setRole(null);
+        setSegment(null);
+      }}
+      onReportQuestion={handleReportQuestion}
+    />
+  );
 }
