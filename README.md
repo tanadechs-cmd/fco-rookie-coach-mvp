@@ -15,7 +15,8 @@ Web prototype for proactive first-week FC Online onboarding support.
 
 - Players choose `Keyboard`, `Xbox (XYAB)`, or `PlayStation (□ △ ○ ✕)` beside the main navigation. The preference is stored in the browser and changes deterministic button instructions across FAQ and journey replies.
 - A final display guard normalizes legacy mixed labels such as `B / ○` into `B` for Xbox or `○` for PlayStation, including AI fallback answers.
-- Admin can edit the lead reply plus separate keyboard/Xbox/PlayStation steps for every knowledge topic in `FAQ & Content`.
+- Admin can edit the lead reply plus separate keyboard/Xbox/PlayStation steps for every Education Hub topic in `FAQ & Content`.
+- Admin can create manual content with a title, keywords, and a deterministic answer. Player questions match manual content before the Education Hub snapshot and AI fallback.
 - Admin can add, edit, and remove FAQ chips, change their journey stage and keywords, and link one or two knowledge topics.
 - The high-priority money intent (for example `หาเงินจากไหน`) always routes to both Welcome Pass and Mission Hub before AI fallback.
 - AI fallback receives the six most recent user/assistant messages plus the selected input method. AI-INsea contextual memory remains enabled for eight messages; persistent cross-session AI memory stays off.
@@ -26,6 +27,7 @@ The fallback prompt and response contract are documented in [`docs/AI-INSEA-FALL
 
 Supabase is the shared source of truth for the production deployment.
 
+- `Proactive Messages` uses a business-readable `Welcome message → IF / ELSE IF / ELSE` builder. Each `ELSE IF` becomes another player choice; `ELSE` can return a fixed reply or use AI fallback.
 - `FAQ & Content`, `Proactive Messages`, and `Unanswered Questions` each use an explicit **Save changes** action. Edits are drafts until that button is pressed.
 - Players receive the published FAQ/content and proactive configuration after their next page load. Responses are not CDN-cached, so a fresh load shows the current published version.
 - Every published FAQ/content or proactive change writes a full configuration snapshot. Admins can inspect **Version History** and restore an earlier configuration; a rollback itself is saved as a new version.

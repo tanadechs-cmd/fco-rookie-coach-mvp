@@ -56,10 +56,12 @@ interface ChatAnswerConfig {
   id: string;
   title: string;
   text: string;
+  keywords: string[];
   keyboardSteps: string[];
   xboxSteps: string[];
   playstationSteps: string[];
   source: string;
+  isManual?: boolean;
 }
 
 interface FaqConfigItem {
@@ -93,10 +95,17 @@ interface ContentBranch {
 
 type DeliveryDay = Day;
 type DeliveryChannel = "notification" | "chat";
-type DeliveryTrigger = "segment_selected" | "session_start" | "after_response" | "content_completed" | "unresolved_return" | "before_handoff";
 type ConfigSection = "faq_content" | "proactive_messages";
 type SharedConfigStatus = "loading" | "ready" | "local-fallback";
 type SaveState = "idle" | "saving" | "saved" | "error";
+
+interface ProactiveBranch {
+  id: string;
+  kind: "if" | "elseif";
+  choice: string;
+  reply: string;
+  contentId?: string;
+}
 
 interface DailyDeliveryPlan {
   id: string;
@@ -104,14 +113,10 @@ interface DailyDeliveryPlan {
   stageId: JourneyStageId;
   name: string;
   channel: DeliveryChannel;
-  trigger: DeliveryTrigger;
-  triggerDetail: string;
   message: string;
-  contentId?: string;
-  responseOptions: string[];
-  nextAction: string;
-  successEvent: string;
-  fallback: string;
+  branches: ProactiveBranch[];
+  elseAction: "reply" | "ai_fallback";
+  elseReply: string;
   status: "active" | "draft";
 }
 
@@ -1027,6 +1032,7 @@ function createDefaultChatAnswers(): ChatAnswerConfig[] {
       id: item.id,
       title: item.title,
       text: direct?.text ?? item.shortSummary,
+      keywords: item.keywords,
       keyboardSteps: direct?.keyboardSteps ?? [],
       xboxSteps: direct?.xboxSteps ?? [],
       playstationSteps: direct?.playstationSteps ?? [],
@@ -1038,7 +1044,7 @@ function createDefaultChatAnswers(): ChatAnswerConfig[] {
 function mergeChatAnswers(raw: unknown): ChatAnswerConfig[] {
   const defaults = createDefaultChatAnswers();
   if (!Array.isArray(raw)) return defaults;
-  return defaults.map((fallback) => {
+  const mergedDefaults = defaults.map((fallback) => {
     const candidate = raw.find((answer): answer is Record<string, unknown> =>
       Boolean(answer) && typeof answer === "object" && (answer as Record<string, unknown>).id === fallback.id,
     );
@@ -1049,12 +1055,64 @@ function mergeChatAnswers(raw: unknown): ChatAnswerConfig[] {
       ...fallback,
       title: typeof candidate.title === "string" ? candidate.title : fallback.title,
       text: candidate.text,
+      keywords: stringList(candidate.keywords, fallback.keywords),
       keyboardSteps: stringList(candidate.keyboardSteps, fallback.keyboardSteps),
       xboxSteps: stringList(candidate.xboxSteps, fallback.xboxSteps),
       playstationSteps: stringList(candidate.playstationSteps, fallback.playstationSteps),
       source: typeof candidate.source === "string" ? candidate.source : fallback.source,
     };
   });
+
+  const defaultIds = new Set(defaults.map((answer) => answer.id));
+  const manualAnswers = raw.flatMap((answer) => {
+    if (!answer || typeof answer !== "object") return [];
+    const candidate = answer as Record<string, unknown>;
+    if (
+      typeof candidate.id !== "string" ||
+      defaultIds.has(candidate.id) ||
+      typeof candidate.title !== "string" ||
+      typeof candidate.text !== "string"
+    ) return [];
+    const stringList = (value: unknown) =>
+      Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
+    return [{
+      id: candidate.id,
+      title: candidate.title,
+      text: candidate.text,
+      keywords: stringList(candidate.keywords),
+      keyboardSteps: stringList(candidate.keyboardSteps),
+      xboxSteps: stringList(candidate.xboxSteps),
+      playstationSteps: stringList(candidate.playstationSteps),
+      source: typeof candidate.source === "string" ? candidate.source : "Manual content",
+      isManual: true,
+    }];
+  });
+
+  return [...mergedDefaults, ...manualAnswers];
+}
+
+function matchManualAnswer(text: string, answerConfigs: ChatAnswerConfig[]): ChatAnswerConfig | undefined {
+  const q = text.toLowerCase();
+  type Candidate = { answer: ChatAnswerConfig; exact: number; count: number; maxLen: number };
+  let best: Candidate | null = null;
+
+  answerConfigs.filter((answer) => answer.isManual).forEach((answer) => {
+    const exact = answer.title.trim() && q.includes(answer.title.trim().toLowerCase()) ? 1 : 0;
+    const matched = answer.keywords.filter((keyword) => keyword.trim() && kwMatches(keyword.trim(), q));
+    if (!exact && matched.length === 0) return;
+    const count = matched.length;
+    const maxLen = count > 0 ? Math.max(...matched.map((keyword) => keyword.length)) : 0;
+    if (
+      !best ||
+      exact > best.exact ||
+      (exact === best.exact && count > best.count) ||
+      (exact === best.exact && count === best.count && maxLen > best.maxLen)
+    ) {
+      best = { answer, exact, count, maxLen };
+    }
+  });
+
+  return best ? (best as Candidate).answer : undefined;
 }
 
 function loadChatAnswers(): ChatAnswerConfig[] {
@@ -1627,12 +1685,14 @@ function CoachScreen({
   onReportQuestion,
   answerConfigs,
   faqConfigs,
+  deliveryPlans,
 }: {
   segment: Exclude<PlayerSegment, "experienced">;
   onLogout: () => void;
   onReportQuestion: (question: string, recentContext: string) => void;
   answerConfigs: ChatAnswerConfig[];
   faqConfigs: FaqConfigItem[];
+  deliveryPlans: DailyDeliveryPlan[];
 }) {
   const [activeTab, setActiveTab] = useState<PlayerTab>("chat");
   const [notifications, setNotifications] = useState<AppNotification[]>(INITIAL_NOTIFICATIONS);
@@ -1641,6 +1701,7 @@ function CoachScreen({
   const [messages, setMessages] = useState<Message[]>([]);
   const [isTyping, setIsTyping] = useState(false);
   const [chipMode, setChipMode] = useState<ChipMode | null>("activation");
+  const [activeProactivePlanId, setActiveProactivePlanId] = useState<string | null>(null);
   const [journeyStage, setJourneyStage] = useState<JourneyStageId>("activation");
   const [shownTopicIds, setShownTopicIds] = useState<Set<string>>(new Set<string>());
   const [input, setInput] = useState("");
@@ -1656,6 +1717,10 @@ function CoachScreen({
   const [reportedQueries, setReportedQueries] = useState<Set<string>>(new Set<string>());
 
   const hasUnread = notifications.some((n) => !n.read);
+  const activeChatPlans = deliveryPlans.filter((plan) => plan.status === "active" && plan.channel === "chat");
+  const activeProactivePlan = activeProactivePlanId
+    ? activeChatPlans.find((plan) => plan.id === activeProactivePlanId) ?? null
+    : null;
 
   function markRead(id: string) {
     setNotifications((prev) => prev.map((n) => n.id === id ? { ...n, read: true } : n));
@@ -1663,17 +1728,19 @@ function CoachScreen({
   }
 
   useEffect(() => {
+    const firstPlan = deliveryPlans.find((plan) => plan.status === "active" && plan.channel === "chat");
     setMessages([
       {
         id: uid(),
         role: "assistant",
-        text: segment === "returning-under-month"
+        text: firstPlan?.message || (segment === "returning-under-month"
           ? "ยินดีต้อนรับกลับมาครับ ตอนนี้ส่วนไหนของเกมที่ยังไม่คุ้นที่สุด?"
-          : "ยินดีต้อนรับครับ ตอนนี้ส่วนไหนของเกมที่ยังติดอยู่?",
+          : "ยินดีต้อนรับครับ ตอนนี้ส่วนไหนของเกมที่ยังติดอยู่?"),
       },
     ]);
+    setActiveProactivePlanId(firstPlan?.id ?? null);
     setJourneyStage("activation");
-    setChipMode("activation");
+    setChipMode(firstPlan ? null : "activation");
     setShownTopicIds(new Set<string>());
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -1700,18 +1767,21 @@ function CoachScreen({
   }
 
   function openCompetencePrompt() {
+    setActiveProactivePlanId(null);
     setJourneyStage("competence");
     append([{ role: "assistant", text: "ตอนนี้อยากพัฒนาเรื่องไหนให้เล่นได้มั่นใจขึ้น?" }]);
     setChipMode("competence");
   }
 
   function openNextGoalPrompt() {
+    setActiveProactivePlanId(null);
     setJourneyStage("next-goal");
     append([{ role: "assistant", text: "ต่อจากนี้อยากตั้งเป้าหมายเรื่องไหนก่อน?" }]);
     setChipMode("next-goal");
   }
 
   function presentJourneyContent(label: string, topicId: string) {
+    setActiveProactivePlanId(null);
     setChipMode(null);
     append([{ role: "user", text: label }]);
     const topic = findKnowledge(topicId);
@@ -1735,12 +1805,14 @@ function CoachScreen({
   }
 
   function handleActivationReady() {
+    setActiveProactivePlanId(null);
     setChipMode(null);
     append([{ role: "user", text: "เริ่มเล่นได้แล้ว" }]);
     botDelay(openCompetencePrompt, 550);
   }
 
   function handleContentUnderstood() {
+    setActiveProactivePlanId(null);
     setChipMode(null);
     append([{ role: "user", text: "เข้าใจแล้ว" }]);
     botDelay(() => {
@@ -1751,6 +1823,7 @@ function CoachScreen({
   }
 
   function handleStillStuck() {
+    setActiveProactivePlanId(null);
     setChipMode(null);
     append([{ role: "user", text: "ยังติดอยู่" }]);
     botDelay(() => {
@@ -1760,6 +1833,7 @@ function CoachScreen({
   }
 
   function handleChooseAnother() {
+    setActiveProactivePlanId(null);
     setChipMode(null);
     append([{ role: "user", text: "เลือกเรื่องอื่น" }]);
     botDelay(() => {
@@ -1770,6 +1844,7 @@ function CoachScreen({
   }
 
   function handleSocialGoal() {
+    setActiveProactivePlanId(null);
     setChipMode(null);
     append([{ role: "user", text: "เล่นกับเพื่อน" }]);
     botDelay(() => {
@@ -1782,11 +1857,44 @@ function CoachScreen({
   }
 
   function handleOpenQuestion() {
+    setActiveProactivePlanId(null);
     setChipMode(null);
     append([{ role: "user", text: "ยังมีคำถาม" }]);
     botDelay(() => {
       append([{ role: "assistant", text: "พิมพ์คำถามได้เลยครับ ถ้าฐานข้อมูลยังไม่มี ผมจะลองถาม AI-INsea หรือส่งให้ทีมเพิ่มข้อมูล" }]);
       setTimeout(() => composerRef.current?.focus(), 200);
+    }, 450);
+  }
+
+  function handleProactiveChoice(plan: DailyDeliveryPlan, branch: ProactiveBranch) {
+    setChipMode(null);
+    append([{ role: "user", text: branch.choice }]);
+    const currentIndex = activeChatPlans.findIndex((candidate) => candidate.id === plan.id);
+    const nextPlan = currentIndex >= 0 ? activeChatPlans[currentIndex + 1] : undefined;
+
+    botDelay(() => {
+      const replies: Omit<Message, "id">[] = [];
+      if (branch.reply.trim()) replies.push({ role: "assistant", text: branch.reply.trim() });
+
+      if (branch.contentId) {
+        const topic = KNOWLEDGE.find((knowledge) => knowledge.topicId === branch.contentId);
+        if (topic) {
+          const answer = getCannedAnswer(topic.id, topic, controlScheme, answerConfigs);
+          showTopic(topic.id);
+          replies.push({
+            role: "assistant",
+            text: answer.text,
+            steps: answer.steps,
+            knowledgeId: topic.id,
+          });
+        }
+      }
+
+      if (nextPlan && nextPlan.message.trim() && nextPlan.message.trim() !== branch.reply.trim()) {
+        replies.push({ role: "assistant", text: nextPlan.message.trim() });
+      }
+      if (replies.length > 0) append(replies);
+      setActiveProactivePlanId(nextPlan?.id ?? null);
     }, 450);
   }
 
@@ -1802,6 +1910,24 @@ function CoachScreen({
           role: "assistant",
           text: "เริ่มจาก Welcome Pass เพื่อรับของเริ่มต้น แล้วเข้า Mission Hub ทำภารกิจและรับรางวัลต่อครับ",
           relatedIds: moneyTopics,
+        }]);
+      }, 450);
+      return;
+    }
+
+    const manualAnswer = matchManualAnswer(question, answerConfigs);
+    if (manualAnswer) {
+      const answer = getCannedAnswer(manualAnswer.id, undefined, controlScheme, answerConfigs);
+      const alreadyShown = shownTopicIds.has(manualAnswer.id);
+      if (!alreadyShown) showTopic(manualAnswer.id);
+      setTimeout(() => {
+        setIsTyping(false);
+        append([{
+          role: "assistant",
+          text: alreadyShown
+            ? `เราเพิ่งคุยเรื่อง ${manualAnswer.title} ไปแล้วครับ ตอนนี้ติดขั้นตอนไหนเป็นพิเศษ?`
+            : answer.text,
+          steps: alreadyShown ? undefined : answer.steps,
         }]);
       }, 450);
       return;
@@ -1883,10 +2009,19 @@ function CoachScreen({
   function handleSend() {
     if (!input.trim()) return;
     const text = input.trim();
+    const currentProactivePlan = activeProactivePlan;
     setInput("");
     setChipMode(null);
+    setActiveProactivePlanId(null);
     append([{ role: "user", text }]);
     setIsTyping(true);
+    if (currentProactivePlan?.elseAction === "reply" && currentProactivePlan.elseReply.trim()) {
+      setTimeout(() => {
+        setIsTyping(false);
+        append([{ role: "assistant", text: currentProactivePlan.elseReply.trim() }]);
+      }, 450);
+      return;
+    }
     void answerQuestion(text);
   }
 
@@ -1902,9 +2037,27 @@ function CoachScreen({
     }
 
     const primary = KNOWLEDGE.find((item) => item.topicId === faq.topicId);
+    const manualPrimary = answerConfigs.find((answer) => answer.isManual && answer.id === faq.topicId);
     const secondary = faq.secondaryTopicId
       ? KNOWLEDGE.find((item) => item.topicId === faq.secondaryTopicId)
       : undefined;
+    const manualSecondary = faq.secondaryTopicId
+      ? answerConfigs.find((answer) => answer.isManual && answer.id === faq.secondaryTopicId)
+      : undefined;
+    if (manualPrimary) {
+      const answer = getCannedAnswer(manualPrimary.id, undefined, controlScheme, answerConfigs);
+      showTopic(manualPrimary.id);
+      if (manualSecondary) showTopic(manualSecondary.id);
+      setTimeout(() => {
+        setIsTyping(false);
+        append([{
+          role: "assistant",
+          text: answer.text,
+          steps: answer.steps,
+        }]);
+      }, 450);
+      return;
+    }
     if (!primary) {
       void answerQuestion(faq.question);
       return;
@@ -1953,7 +2106,11 @@ function CoachScreen({
     ],
   };
 
-  const activeChips = chipMode ? chipSets[chipMode] : [];
+  const activeChips = activeProactivePlan
+    ? activeProactivePlan.branches
+        .filter((branch) => branch.choice.trim())
+        .map((branch) => ({ label: branch.choice, action: () => handleProactiveChoice(activeProactivePlan, branch) }))
+    : chipMode ? chipSets[chipMode] : [];
 
   return (
     <div className="h-screen flex overflow-hidden" style={{ backgroundColor: "var(--background)" }}>
@@ -2409,40 +2566,71 @@ const INITIAL_FLOWS: ContentFlow[] = [
 
 const INITIAL_DAILY_DELIVERY_PLANS: DailyDeliveryPlan[] = [
   {
-    id: "pm-1", day: 1, stageId: "activation", name: "Find the first blocker", channel: "chat",
-    trigger: "segment_selected", triggerDetail: "หลังเลือก เพิ่งเริ่มเล่น หรือ เพิ่งกลับมาเล่น",
-    message: "ตอนนี้ส่วนไหนของเกมที่ยังติดอยู่?", responseOptions: ["ยังไม่คุ้นปุ่ม", "ไม่รู้จะเริ่มตรงไหน", "ติดระหว่างแข่ง", "เริ่มเล่นได้แล้ว"],
-    nextAction: "เลือกคำแนะนำตาม blocker", successEvent: "player_selected_first_blocker", fallback: "เปิดช่องพิมพ์คำถาม", status: "active",
+    id: "pm-1", day: 1, stageId: "activation", name: "เช็กว่าเล่นเกมแรกหรือยัง", channel: "chat",
+    message: "เล่นเกมแรกไปแล้วหรือยัง?",
+    branches: [
+      { id: "pm-1-if", kind: "if", choice: "ยังไม่ได้เล่น", reply: "อยากเริ่มเล่นโหมดไหน?" },
+      { id: "pm-1-elseif", kind: "elseif", choice: "เล่นแล้ว", reply: "เกมแรกที่เล่นเป็นโหมดไหน?" },
+    ],
+    elseAction: "ai_fallback", elseReply: "",
+    status: "active",
   },
   {
-    id: "pm-2", day: 1, stageId: "activation", name: "Return with an unresolved blocker", channel: "notification",
-    trigger: "unresolved_return", triggerDetail: "กลับเข้าเว็บและยังไม่มี success event ของ Activation",
-    message: "ยังติดเรื่องเดิมอยู่ไหม? กลับมาถามโค้ชต่อได้เลย", responseOptions: ["ถามต่อ", "เลือกเรื่องใหม่"],
-    nextAction: "กลับเข้าบทสนทนาล่าสุด", successEvent: "player_resumed_help", fallback: "ไม่ส่งซ้ำภายใน 24 ชั่วโมง", status: "active",
+    id: "pm-2", day: 1, stageId: "activation", name: "ถามโหมดที่เพิ่งเล่น", channel: "chat",
+    message: "เกมแรกที่เล่นเป็นโหมดไหน?",
+    branches: [
+      { id: "pm-2-if", kind: "if", choice: "ฝึกกับคอม", reply: "แล้วตอนเล่น ติดตรงไหนมากที่สุด?" },
+      { id: "pm-2-elseif-1", kind: "elseif", choice: "แข่งกับผู้เล่นอื่น", reply: "แล้วตอนเล่น ติดตรงไหนมากที่สุด?" },
+      { id: "pm-2-elseif-2", kind: "elseif", choice: "โหมดอื่น", reply: "พิมพ์ชื่อโหมดได้เลย แล้วตอนเล่นติดตรงไหนมากที่สุด?" },
+    ],
+    elseAction: "ai_fallback", elseReply: "",
+    status: "active",
   },
   {
-    id: "pm-3", day: 2, stageId: "competence", name: "Choose one improvement goal", channel: "chat",
-    trigger: "after_response", triggerDetail: "หลังผู้เล่นผ่าน Activation หรือบอกว่าเริ่มเล่นได้แล้ว",
-    message: "ตอนนี้อยากพัฒนาเรื่องไหนให้เล่นได้มั่นใจขึ้น?", responseOptions: ["เล่นให้คล่อง", "จัดทีม", "รางวัลและภารกิจ", "ยังไม่แน่ใจ"],
-    nextAction: "ส่ง content ที่ตรงกับเป้าหมาย", successEvent: "player_selected_improvement_goal", fallback: "ถามให้ผู้เล่นอธิบายสิ่งที่ติด", status: "active",
+    id: "pm-3", day: 1, stageId: "activation", name: "หาสิ่งที่ติดหลังเกมแรก", channel: "chat",
+    message: "แล้วตอนเล่น ติดตรงไหนมากที่สุด?",
+    branches: [
+      { id: "pm-3-if", kind: "if", choice: "กดปุ่มยังไม่คล่อง", reply: "ใช้คีย์บอร์ด Xbox หรือ PlayStation?", contentId: "FCO-EDU-030" },
+      { id: "pm-3-elseif-1", kind: "elseif", choice: "บุกไม่ออก / ยิงไม่เข้า", reply: "ติดที่ส่งบอล หาช่องยิง หรือยิงแล้วไม่เข้ามากกว่ากัน?", contentId: "FCO-EDU-001" },
+      { id: "pm-3-elseif-2", kind: "elseif", choice: "รับไม่ทัน / โดนแย่งบอล", reply: "ติดที่ตามคู่แข่งไม่ทัน หรือแย่งบอลแล้วฟาวล์?", contentId: "FCO-EDU-044" },
+      { id: "pm-3-elseif-3", kind: "elseif", choice: "คู่แข่งยากเกินไป", reply: "อยากฝึกเรื่องบุกหรือรับก่อน?" },
+      { id: "pm-3-elseif-4", kind: "elseif", choice: "ยังไม่ติดอะไร", reply: "ดีเลย ต่อไปอยากจัดทีม หาเงิน หรือฝึกให้คล่องขึ้น?" },
+    ],
+    elseAction: "ai_fallback", elseReply: "",
+    status: "active",
   },
   {
-    id: "pm-4", day: 2, stageId: "competence", name: "Check understanding after content", channel: "chat",
-    trigger: "content_completed", triggerDetail: "หลังเปิดวิดีโอหรือคำแนะนำจากฐานข้อมูล",
-    message: "ดูแล้วเป็นอย่างไรบ้าง?", responseOptions: ["เข้าใจแล้ว", "ยังติดอยู่", "เลือกเรื่องอื่น"],
-    nextAction: "ถามจุดที่ยังติด หรือไปเป้าหมายถัดไป", successEvent: "player_completed_content_followup", fallback: "AI-INsea แล้วเก็บ unanswered question", status: "active",
+    id: "pm-4", day: 2, stageId: "competence", name: "ถามต่อหลังส่งคำตอบ", channel: "chat",
+    message: "ลองแล้วเป็นอย่างไรบ้าง?",
+    branches: [
+      { id: "pm-4-if", kind: "if", choice: "เข้าใจแล้ว", reply: "ดีมากครับ ตอนนี้อยากพัฒนาเรื่องไหนต่อ?" },
+      { id: "pm-4-elseif-1", kind: "elseif", choice: "ยังติดอยู่", reply: "บอกผมสั้น ๆ ได้เลยว่าติดตรงปุ่มหรือจังหวะไหน" },
+      { id: "pm-4-elseif-2", kind: "elseif", choice: "เลือกเรื่องอื่น", reply: "อยากถามเรื่องไหนต่อ?" },
+    ],
+    elseAction: "ai_fallback", elseReply: "",
+    status: "active",
   },
   {
-    id: "pm-5", day: 3, stageId: "next-goal", name: "Set a reason to return", channel: "notification",
-    trigger: "session_start", triggerDetail: "เปิดเว็บในช่วง Next goal และยังไม่ได้เลือกเป้าหมาย",
-    message: "เป้าหมายต่อไปของคุณคืออะไร?", responseOptions: ["สร้างทีมให้ดีขึ้น", "หา BP และรางวัล", "เล่นกับเพื่อน", "ยังมีคำถาม"],
-    nextAction: "พาไป content หรือช่องทางที่เหมาะสม", successEvent: "player_selected_next_goal", fallback: "เปิด FAQ และช่องพิมพ์", status: "active",
+    id: "pm-5", day: 3, stageId: "next-goal", name: "เลือกเป้าหมายถัดไป", channel: "notification",
+    message: "ต่อไปอยากทำอะไรใน FC Online?",
+    branches: [
+      { id: "pm-5-if", kind: "if", choice: "สร้างทีมให้ดีขึ้น", reply: "เริ่มจากทีมที่มี แล้วค่อยเติมตำแหน่งที่ขาดครับ", contentId: "FCO-EDU-041" },
+      { id: "pm-5-elseif-1", kind: "elseif", choice: "หา BP และรางวัล", reply: "เริ่มจาก Welcome Pass และ Mission Hub ก่อนครับ", contentId: "FCO-EDU-018" },
+      { id: "pm-5-elseif-2", kind: "elseif", choice: "เล่นกับเพื่อน", reply: "ไปต่อที่ชุมชน FC Online Discord ได้เลยครับ" },
+    ],
+    elseAction: "ai_fallback", elseReply: "",
+    status: "active",
   },
   {
-    id: "pm-6", day: 3, stageId: "next-goal", name: "Route to the right next channel", channel: "chat",
-    trigger: "before_handoff", triggerDetail: "หลังเลือก next goal หรือคำถามเกินฐานความรู้",
-    message: "อยากไปต่อด้วย Educational Hub, ชุมชน หรือให้ทีมช่วยเพิ่มคำตอบ?", responseOptions: ["Educational Hub", "Discord", "รายงานคำถาม"],
-    nextAction: "ส่งต่อโดยไม่บังคับเข้า Discord", successEvent: "player_completed_handoff", fallback: "เก็บคำถามและแสดงสถานะรับเรื่อง", status: "draft",
+    id: "pm-6", day: 3, stageId: "next-goal", name: "ส่งต่อเมื่อยังไม่มีคำตอบ", channel: "chat",
+    message: "อยากไปต่อทางไหน?",
+    branches: [
+      { id: "pm-6-if", kind: "if", choice: "Education Hub", reply: "เปิด Education Hub ให้แล้วครับ" },
+      { id: "pm-6-elseif-1", kind: "elseif", choice: "Discord", reply: "เข้า Discord FC Online ได้เลยครับ" },
+      { id: "pm-6-elseif-2", kind: "elseif", choice: "ส่งคำถามให้ทีม", reply: "รับเรื่องแล้วครับ ทีมจะใช้คำถามนี้เพิ่มฐานความรู้" },
+    ],
+    elseAction: "ai_fallback", elseReply: "",
+    status: "draft",
   },
 ];
 
@@ -2494,7 +2682,6 @@ const FAQ_CONFIG_STORAGE_KEY = "fco-faq-config-v1";
 function normalizeFaqConfigs(raw: unknown): FaqConfigItem[] {
   if (!Array.isArray(raw)) return FAQ_CONFIG;
   const stageIds = new Set<JourneyStageId>(["activation", "competence", "next-goal"]);
-  const topicIds = new Set(KNOWLEDGE.map((item) => item.topicId));
   return raw.flatMap((item) => {
     if (!item || typeof item !== "object") return [];
     const candidate = item as Record<string, unknown>;
@@ -2503,11 +2690,11 @@ function normalizeFaqConfigs(raw: unknown): FaqConfigItem[] {
       typeof candidate.question !== "string" ||
       typeof candidate.trigger !== "string" ||
       typeof candidate.topicId !== "string" ||
-      !topicIds.has(candidate.topicId) ||
+      candidate.topicId.trim().length === 0 ||
       !stageIds.has(candidate.stageId as JourneyStageId)
     ) return [];
     const secondaryTopicId =
-      typeof candidate.secondaryTopicId === "string" && topicIds.has(candidate.secondaryTopicId)
+      typeof candidate.secondaryTopicId === "string" && candidate.secondaryTopicId.trim().length > 0
         ? candidate.secondaryTopicId
         : undefined;
     return [{
@@ -2525,39 +2712,55 @@ function normalizeDeliveryPlans(raw: unknown): DailyDeliveryPlan[] {
   if (!Array.isArray(raw)) return INITIAL_DAILY_DELIVERY_PLANS;
   const stageIds = new Set<JourneyStageId>(["activation", "competence", "next-goal"]);
   const channels = new Set<DeliveryChannel>(["notification", "chat"]);
-  const triggers = new Set<DeliveryTrigger>([
-    "segment_selected", "session_start", "after_response", "content_completed", "unresolved_return", "before_handoff",
-  ]);
   const statuses = new Set<DailyDeliveryPlan["status"]>(["active", "draft"]);
-  const topicIds = new Set(KNOWLEDGE.map((item) => item.topicId));
   return raw.flatMap((item) => {
     if (!item || typeof item !== "object") return [];
     const candidate = item as Record<string, unknown>;
-    const textFields = ["id", "name", "triggerDetail", "message", "nextAction", "successEvent", "fallback"];
+    const textFields = ["id", "name", "message"];
     if (
       !textFields.every((field) => typeof candidate[field] === "string") ||
       ![1, 2, 3].includes(candidate.day as number) ||
       !stageIds.has(candidate.stageId as JourneyStageId) ||
       !channels.has(candidate.channel as DeliveryChannel) ||
-      !triggers.has(candidate.trigger as DeliveryTrigger) ||
-      !statuses.has(candidate.status as DailyDeliveryPlan["status"]) ||
-      !Array.isArray(candidate.responseOptions) ||
-      !candidate.responseOptions.every((value) => typeof value === "string")
+      !statuses.has(candidate.status as DailyDeliveryPlan["status"])
     ) return [];
+
+    const rawBranches = Array.isArray(candidate.branches)
+      ? candidate.branches
+      : Array.isArray(candidate.responseOptions)
+        ? candidate.responseOptions.map((choice, index) => ({
+            id: `${candidate.id}-legacy-${index}`,
+            kind: index === 0 ? "if" : "elseif",
+            choice,
+            reply: "",
+          }))
+        : [];
+    const branches = rawBranches.flatMap((branch, index) => {
+      if (!branch || typeof branch !== "object") return [];
+      const value = branch as Record<string, unknown>;
+      if (typeof value.choice !== "string" || typeof value.reply !== "string") return [];
+      return [{
+        id: typeof value.id === "string" ? value.id : `${candidate.id}-branch-${index}`,
+        kind: index === 0 ? "if" as const : "elseif" as const,
+        choice: value.choice,
+        reply: value.reply,
+        contentId: typeof value.contentId === "string" && value.contentId.trim() ? value.contentId : undefined,
+      }];
+    });
+
+    const legacyFallback = typeof candidate.fallback === "string" ? candidate.fallback : "";
     return [{
       id: candidate.id as string,
       day: candidate.day as DeliveryDay,
       stageId: candidate.stageId as JourneyStageId,
       name: candidate.name as string,
       channel: candidate.channel as DeliveryChannel,
-      trigger: candidate.trigger as DeliveryTrigger,
-      triggerDetail: candidate.triggerDetail as string,
       message: candidate.message as string,
-      contentId: typeof candidate.contentId === "string" && topicIds.has(candidate.contentId) ? candidate.contentId : undefined,
-      responseOptions: candidate.responseOptions as string[],
-      nextAction: candidate.nextAction as string,
-      successEvent: candidate.successEvent as string,
-      fallback: candidate.fallback as string,
+      branches,
+      elseAction: candidate.elseAction === "reply" || candidate.elseAction === "ai_fallback"
+        ? candidate.elseAction
+        : legacyFallback.toLowerCase().includes("ai") ? "ai_fallback" : "reply",
+      elseReply: typeof candidate.elseReply === "string" ? candidate.elseReply : legacyFallback,
       status: candidate.status as DailyDeliveryPlan["status"],
     }];
   });
@@ -2690,18 +2893,37 @@ function AdminProactiveMessages({
     setSaveState("idle");
   }
 
+  function patchBranch(planId: string, branchId: string, update: Partial<ProactiveBranch>) {
+    setPlans((prev) => prev.map((plan) => plan.id === planId
+      ? { ...plan, branches: plan.branches.map((branch) => branch.id === branchId ? { ...branch, ...update } : branch) }
+      : plan));
+    setSaveState("idle");
+  }
+
+  function addElseIf(planId: string) {
+    setPlans((prev) => prev.map((plan) => plan.id === planId
+      ? {
+          ...plan,
+          branches: [...plan.branches, { id: uid(), kind: plan.branches.length === 0 ? "if" : "elseif", choice: "", reply: "" }],
+        }
+      : plan));
+    setSaveState("idle");
+  }
+
+  function removeBranch(planId: string, branchId: string) {
+    setPlans((prev) => prev.map((plan) => {
+      if (plan.id !== planId) return plan;
+      const branches = plan.branches.filter((branch) => branch.id !== branchId)
+        .map((branch, index) => ({ ...branch, kind: index === 0 ? "if" as const : "elseif" as const }));
+      return { ...plan, branches };
+    }));
+    setSaveState("idle");
+  }
+
   const visiblePlans = stageFilter === "all" ? plans : plans.filter((p) => p.stageId === stageFilter);
   const inputCls = "h-9 px-3 rounded-md text-sm w-full";
   const inputStyle = { border: "1px solid var(--border)", backgroundColor: "var(--card)", color: "var(--foreground)", outline: "none" as const };
   const CHANNEL_LABELS: Record<DeliveryChannel, string> = { notification: "Notification", chat: "Chat" };
-  const TRIGGER_LABELS: Record<DeliveryTrigger, string> = {
-    segment_selected: "Segment selected",
-    session_start: "Session start",
-    after_response: "After response",
-    content_completed: "Content completed",
-    unresolved_return: "Unresolved return",
-    before_handoff: "Before handoff",
-  };
 
   async function saveChanges() {
     setSaveState("saving");
@@ -2721,7 +2943,7 @@ function AdminProactiveMessages({
         <div>
           <h2 className="text-base font-semibold" style={{ color: "var(--foreground)" }}>Proactive Messages</h2>
           <p className="text-xs mt-1" style={{ color: "var(--muted-foreground)" }}>
-            Bot-initiated messages driven by player behavior, not a once-per-day schedule
+            ตั้ง Welcome message แล้วกำหนดคำตอบด้วย IF / ELSE IF / ELSE
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -2734,9 +2956,9 @@ function AdminProactiveMessages({
               const day = JOURNEY_STAGES.find((s) => s.id === stage)?.day ?? 1;
               const id = uid();
               setPlans((prev) => [...prev, {
-                id, day, stageId: stage, name: "New proactive message", channel: "chat", trigger: "after_response",
-                triggerDetail: "กำหนดเงื่อนไขการส่ง", message: "", responseOptions: [], nextAction: "",
-                successEvent: "", fallback: "เปิดช่องพิมพ์คำถาม", status: "draft",
+                id, day, stageId: stage, name: "New proactive message", channel: "chat",
+                message: "", branches: [{ id: uid(), kind: "if", choice: "", reply: "" }],
+                elseAction: "ai_fallback", elseReply: "", status: "draft",
               }]);
               setEditingId(id);
               setSaveState("idle");
@@ -2774,7 +2996,6 @@ function AdminProactiveMessages({
       <div className="flex flex-col gap-2">
         {visiblePlans.map((plan) => {
           const isEditing = editingId === plan.id;
-          const linkedTopic = plan.contentId ? KNOWLEDGE.find((k) => k.topicId === plan.contentId) : undefined;
           const stage = JOURNEY_STAGES.find((s) => s.id === plan.stageId);
 
           return (
@@ -2799,7 +3020,7 @@ function AdminProactiveMessages({
                   {CHANNEL_LABELS[plan.channel]}
                 </span>
                 <span className="text-[10px] px-2 py-0.5 rounded-full shrink-0" style={{ backgroundColor: "var(--muted)", color: "var(--muted-foreground)" }}>
-                  {TRIGGER_LABELS[plan.trigger]}
+                  IF + {Math.max(plan.branches.length - 1, 0)} ELSE IF
                 </span>
                 <span className="text-xs flex-1 min-w-0">
                   <span className="block font-semibold truncate" style={{ color: "var(--foreground)" }}>{plan.name}</span>
@@ -2821,7 +3042,7 @@ function AdminProactiveMessages({
                   className="flex flex-col gap-4 px-4 py-4"
                   style={{ borderTop: "1px solid var(--border)", backgroundColor: "var(--background)" }}
                 >
-                  <div className="grid md:grid-cols-3 gap-4">
+                  <div className="grid md:grid-cols-2 gap-4">
                     <div className="flex flex-col gap-1.5">
                       <label className="text-xs font-medium" style={{ color: "var(--muted-foreground)" }}>Stage</label>
                       <select value={plan.stageId} onChange={(e) => {
@@ -2843,27 +3064,15 @@ function AdminProactiveMessages({
                         <option value="chat">Chat</option>
                       </select>
                     </div>
-                    <div className="flex flex-col gap-1.5">
-                      <label className="text-xs font-medium" style={{ color: "var(--muted-foreground)" }}>Trigger</label>
-                      <select value={plan.trigger} onChange={(e) => patch(plan.id, { trigger: e.target.value as DeliveryTrigger })} className={inputCls} style={inputStyle}>
-                        {Object.entries(TRIGGER_LABELS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
-                      </select>
-                    </div>
-                  </div>
-
-                  <div className="grid md:grid-cols-2 gap-4">
-                    <div className="flex flex-col gap-1.5">
-                      <label className="text-xs font-medium" style={{ color: "var(--muted-foreground)" }}>Message name</label>
-                      <input value={plan.name} onChange={(e) => patch(plan.id, { name: e.target.value })} className={inputCls} style={inputStyle} />
-                    </div>
-                    <div className="flex flex-col gap-1.5">
-                      <label className="text-xs font-medium" style={{ color: "var(--muted-foreground)" }}>Trigger detail</label>
-                      <input value={plan.triggerDetail} onChange={(e) => patch(plan.id, { triggerDetail: e.target.value })} className={inputCls} style={inputStyle} />
-                    </div>
                   </div>
 
                   <div className="flex flex-col gap-1.5">
-                    <label className="text-xs font-medium" style={{ color: "var(--muted-foreground)" }}>Message</label>
+                    <label className="text-xs font-medium" style={{ color: "var(--muted-foreground)" }}>Message name</label>
+                    <input value={plan.name} onChange={(e) => patch(plan.id, { name: e.target.value })} className={inputCls} style={inputStyle} />
+                  </div>
+
+                  <div className="flex flex-col gap-1.5">
+                    <label className="text-xs font-medium" style={{ color: "var(--muted-foreground)" }}>Welcome message</label>
                     <textarea
                       value={plan.message}
                       onChange={(e) => patch(plan.id, { message: e.target.value })}
@@ -2873,40 +3082,97 @@ function AdminProactiveMessages({
                     />
                   </div>
 
-                  <div className="grid md:grid-cols-2 gap-4">
-                    <div className="flex flex-col gap-1.5">
-                      <label className="text-xs font-medium" style={{ color: "var(--muted-foreground)" }}>Response options</label>
-                      <input value={plan.responseOptions.join(" • ")} onChange={(e) => patch(plan.id, { responseOptions: e.target.value.split("•").map((v) => v.trim()).filter(Boolean) })} className={inputCls} style={inputStyle} />
+                  <div className="flex flex-col gap-2">
+                    <div className="flex items-center justify-between gap-3">
+                      <div>
+                        <p className="text-xs font-semibold" style={{ color: "var(--foreground)" }}>Multiple-choice replies</p>
+                        <p className="text-[10px] mt-0.5" style={{ color: "var(--muted-foreground)" }}>คำตอบแต่ละข้อจะเป็นปุ่มให้ผู้เล่นเลือก</p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => addElseIf(plan.id)}
+                        className="h-8 px-3 rounded-lg text-xs font-semibold"
+                        style={{ backgroundColor: "var(--muted)", color: "var(--foreground)" }}
+                      >
+                        + เพิ่ม ELSE IF
+                      </button>
                     </div>
-                    <div className="flex flex-col gap-1.5">
-                      <label className="text-xs font-medium" style={{ color: "var(--muted-foreground)" }}>Next action</label>
-                      <input value={plan.nextAction} onChange={(e) => patch(plan.id, { nextAction: e.target.value })} className={inputCls} style={inputStyle} />
-                    </div>
-                    <div className="flex flex-col gap-1.5">
-                      <label className="text-xs font-medium" style={{ color: "var(--muted-foreground)" }}>Success event</label>
-                      <input value={plan.successEvent} onChange={(e) => patch(plan.id, { successEvent: e.target.value })} className={inputCls} style={inputStyle} />
-                    </div>
-                    <div className="flex flex-col gap-1.5">
-                      <label className="text-xs font-medium" style={{ color: "var(--muted-foreground)" }}>Fallback</label>
-                      <input value={plan.fallback} onChange={(e) => patch(plan.id, { fallback: e.target.value })} className={inputCls} style={inputStyle} />
-                    </div>
+
+                    {plan.branches.map((branch, index) => (
+                      <div key={branch.id} className="rounded-lg border p-3 flex flex-col gap-3" style={{ borderColor: "var(--border)", backgroundColor: "var(--card)" }}>
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="text-[10px] px-2 py-0.5 rounded-full font-bold" style={{ backgroundColor: index === 0 ? "rgba(196,30,30,0.08)" : "var(--muted)", color: index === 0 ? "var(--primary)" : "var(--muted-foreground)" }}>
+                            {index === 0 ? "IF" : "ELSE IF"}
+                          </span>
+                          {plan.branches.length > 1 && (
+                            <button type="button" onClick={() => removeBranch(plan.id, branch.id)} className="text-[10px]" style={{ color: "var(--primary)" }}>ลบตัวเลือก</button>
+                          )}
+                        </div>
+                        <div className="grid md:grid-cols-2 gap-3">
+                          <label className="flex flex-col gap-1 text-[11px] font-medium" style={{ color: "var(--muted-foreground)" }}>
+                            ถ้าผู้เล่นเลือก
+                            <input
+                              value={branch.choice}
+                              onChange={(event) => patchBranch(plan.id, branch.id, { choice: event.target.value })}
+                              placeholder="เช่น เล่นแล้ว"
+                              className={inputCls}
+                              style={inputStyle}
+                            />
+                          </label>
+                          <label className="flex flex-col gap-1 text-[11px] font-medium" style={{ color: "var(--muted-foreground)" }}>
+                            ให้ Bot ตอบ
+                            <input
+                              value={branch.reply}
+                              onChange={(event) => patchBranch(plan.id, branch.id, { reply: event.target.value })}
+                              placeholder="ข้อความตอบกลับหรือคำถามถัดไป"
+                              className={inputCls}
+                              style={inputStyle}
+                            />
+                          </label>
+                        </div>
+                        <label className="flex flex-col gap-1 text-[11px] font-medium" style={{ color: "var(--muted-foreground)" }}>
+                          ส่ง Content เพิ่มเติม (ไม่บังคับ)
+                          <select
+                            value={branch.contentId ?? ""}
+                            onChange={(event) => patchBranch(plan.id, branch.id, { contentId: event.target.value || undefined })}
+                            className={inputCls}
+                            style={inputStyle}
+                          >
+                            <option value="">— ไม่ส่ง content —</option>
+                            {KNOWLEDGE.map((knowledge) => (
+                              <option key={knowledge.topicId} value={knowledge.topicId}>{knowledge.topicId} · {knowledge.title}</option>
+                            ))}
+                          </select>
+                        </label>
+                      </div>
+                    ))}
                   </div>
 
-                  <div className="flex flex-col gap-1.5">
-                    <label className="text-xs font-medium" style={{ color: "var(--muted-foreground)" }}>Linked content</label>
+                  <div className="rounded-lg border p-3 flex flex-col gap-3" style={{ borderColor: "var(--border)", backgroundColor: "var(--card)" }}>
+                    <span className="text-[10px] px-2 py-0.5 rounded-full font-bold w-fit" style={{ backgroundColor: "var(--muted)", color: "var(--muted-foreground)" }}>ELSE</span>
+                    <label className="text-[11px] font-medium" style={{ color: "var(--muted-foreground)" }}>เมื่อไม่ตรงกับตัวเลือกด้านบน</label>
                     <select
-                      value={plan.contentId ?? ""}
-                      onChange={(e) => patch(plan.id, { contentId: e.target.value || undefined })}
+                      value={plan.elseAction}
+                      onChange={(event) => patch(plan.id, { elseAction: event.target.value as DailyDeliveryPlan["elseAction"] })}
                       className={inputCls}
                       style={inputStyle}
                     >
-                      <option value="">— none —</option>
-                      {KNOWLEDGE.map((k) => (
-                        <option key={k.id} value={k.topicId}>{k.topicId} • {k.title}</option>
-                      ))}
+                      <option value="ai_fallback">ใช้ AI fallback</option>
+                      <option value="reply">ตอบด้วยข้อความที่กำหนด</option>
                     </select>
-                    {linkedTopic && (
-                      <p className="text-xs" style={{ color: "var(--muted-foreground)" }}>{linkedTopic.shortSummary}</p>
+                    {plan.elseAction === "reply" ? (
+                      <textarea
+                        value={plan.elseReply}
+                        onChange={(event) => patch(plan.id, { elseReply: event.target.value })}
+                        rows={2}
+                        placeholder="ข้อความตอบกลับเมื่อไม่ตรงกับตัวเลือก"
+                        className="px-3 py-2 rounded-md text-sm resize-none"
+                        style={{ ...inputStyle, lineHeight: "1.6" }}
+                      />
+                    ) : (
+                      <p className="text-xs" style={{ color: "var(--muted-foreground)" }}>
+                        ระบบจะค้น Manual Content และฐานความรู้ก่อน แล้วจึงเรียก AI-INsea
+                      </p>
                     )}
                   </div>
 
@@ -2970,14 +3236,21 @@ function AdminContentLibrary({
 }) {
   const [search, setSearch] = useState("");
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [selectedManualId, setSelectedManualId] = useState<string | null>(null);
   const [saveState, setSaveState] = useState<SaveState>("idle");
   const [saveError, setSaveError] = useState("");
 
+  const manualAnswers = answerConfigs.filter((answer) => answer.isManual);
+  const normalizedSearch = search.trim().toLowerCase();
   const filtered = KNOWLEDGE.filter(
     (k) =>
-      k.title.toLowerCase().includes(search.toLowerCase()) ||
-      k.topicId.toLowerCase().includes(search.toLowerCase()) ||
-      k.category.toLowerCase().includes(search.toLowerCase())
+      k.title.toLowerCase().includes(normalizedSearch) ||
+      k.topicId.toLowerCase().includes(normalizedSearch) ||
+      k.category.toLowerCase().includes(normalizedSearch)
+  );
+  const filteredManualAnswers = manualAnswers.filter((answer) =>
+    answer.title.toLowerCase().includes(normalizedSearch) ||
+    answer.keywords.some((keyword) => keyword.toLowerCase().includes(normalizedSearch))
   );
 
   const selected = selectedId ? KNOWLEDGE.find((k) => k.id === selectedId) : null;
@@ -2985,6 +3258,31 @@ function AdminContentLibrary({
 
   function patchAnswer(id: string, update: Partial<ChatAnswerConfig>) {
     setAnswerConfigs((prev) => prev.map((answer) => answer.id === id ? { ...answer, ...update } : answer));
+    setSaveState("idle");
+  }
+
+  function addManualContent() {
+    const id = `manual-${uid()}`;
+    setAnswerConfigs((prev) => [...prev, {
+      id,
+      title: "หัวข้อใหม่",
+      text: "",
+      keywords: [],
+      keyboardSteps: [],
+      xboxSteps: [],
+      playstationSteps: [],
+      source: "Manual content",
+      isManual: true,
+    }]);
+    setSelectedManualId(id);
+    setSelectedId(null);
+    setSaveState("idle");
+  }
+
+  function removeManualContent(id: string) {
+    setAnswerConfigs((prev) => prev.filter((answer) => answer.id !== id));
+    setFaqConfigs((prev) => prev.filter((faq) => faq.topicId !== id && faq.secondaryTopicId !== id));
+    setSelectedManualId((current) => current === id ? null : current);
     setSaveState("idle");
   }
 
@@ -3013,10 +3311,17 @@ function AdminContentLibrary({
           <div className="flex items-start justify-between gap-3">
             <div>
               <h2 className="text-base font-semibold" style={{ color: "var(--foreground)" }}>FAQ &amp; Content</h2>
-              <p className="text-xs mt-1" style={{ color: "var(--muted-foreground)" }}>เพิ่ม แก้ หรือลบ FAQ และคำตอบที่เชื่อมกับฐานข้อมูล</p>
+              <p className="text-xs mt-1" style={{ color: "var(--muted-foreground)" }}>เพิ่มคำตอบเองได้ ระบบจะค้น Manual Content ก่อนใช้ AI fallback</p>
             </div>
             <div className="flex items-center gap-2">
               <SaveChangesButton state={saveState} onClick={saveChanges} disabled={configStatus !== "ready"} />
+              <button
+                onClick={addManualContent}
+                className="h-9 px-3 rounded-lg text-xs font-semibold shrink-0"
+                style={{ backgroundColor: "var(--primary)", color: "var(--primary-foreground)" }}
+              >
+                + เพิ่ม Content
+              </button>
               <button
                 onClick={() => {
                   setFaqConfigs((prev) => [...prev, {
@@ -3043,10 +3348,90 @@ function AdminContentLibrary({
           )}
           {saveError && <p className="text-xs" style={{ color: "var(--primary)" }}>{saveError}</p>}
 
+          <section className="flex flex-col gap-2">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <h3 className="text-xs font-semibold" style={{ color: "var(--foreground)" }}>Manual Content</h3>
+                <p className="text-[10px] mt-0.5" style={{ color: "var(--muted-foreground)" }}>หัวข้อ + keywords + คำตอบที่ทีมกำหนดเอง</p>
+              </div>
+              <span className="text-[10px]" style={{ color: "var(--muted-foreground)" }}>{manualAnswers.length} หัวข้อ</span>
+            </div>
+
+            {manualAnswers.length === 0 && (
+              <div className="rounded-lg border border-dashed px-4 py-3 text-xs" style={{ borderColor: "var(--border)", color: "var(--muted-foreground)" }}>
+                ยังไม่มี Manual Content · กด “+ เพิ่ม Content” เพื่อสร้างคำตอบ เช่น “ยิง Low Shot ทำยังไง”
+              </div>
+            )}
+
+            {filteredManualAnswers.map((answer) => {
+              const expanded = selectedManualId === answer.id;
+              return (
+                <div key={answer.id} className="rounded-lg border overflow-hidden" style={{ borderColor: expanded ? "var(--primary)" : "var(--border)", backgroundColor: "var(--card)" }}>
+                  <button
+                    type="button"
+                    onClick={() => { setSelectedManualId(expanded ? null : answer.id); setSelectedId(null); }}
+                    className="w-full px-3 py-2.5 flex items-center gap-3 text-left"
+                  >
+                    <span className="text-[10px] px-2 py-0.5 rounded-full font-bold shrink-0" style={{ backgroundColor: "rgba(196,30,30,0.08)", color: "var(--primary)" }}>MANUAL</span>
+                    <span className="text-xs font-semibold flex-1 truncate" style={{ color: "var(--foreground)" }}>{answer.title || "ยังไม่มีชื่อหัวข้อ"}</span>
+                    <span className="text-[10px] truncate max-w-56" style={{ color: "var(--muted-foreground)" }}>{answer.keywords.join(", ") || "ยังไม่มี keywords"}</span>
+                  </button>
+                  {expanded && (
+                    <div className="p-3 flex flex-col gap-3" style={{ borderTop: "1px solid var(--border)", backgroundColor: "var(--background)" }}>
+                      <div className="grid md:grid-cols-2 gap-3">
+                        <label className="flex flex-col gap-1 text-[11px] font-medium" style={{ color: "var(--muted-foreground)" }}>
+                          ชื่อหัวข้อ
+                          <input
+                            value={answer.title}
+                            onChange={(event) => patchAnswer(answer.id, { title: event.target.value })}
+                            placeholder="เช่น ยิง Low Shot ทำยังไง"
+                            className="h-9 px-3 rounded-md text-sm outline-none"
+                            style={{ border: "1px solid var(--border)", backgroundColor: "var(--card)", color: "var(--foreground)" }}
+                          />
+                        </label>
+                        <label className="flex flex-col gap-1 text-[11px] font-medium" style={{ color: "var(--muted-foreground)" }}>
+                          Keywords · คั่นด้วย comma
+                          <input
+                            value={answer.keywords.join(", ")}
+                            onChange={(event) => patchAnswer(answer.id, { keywords: event.target.value.split(",").map((value) => value.trim()).filter(Boolean) })}
+                            placeholder="low shot, ยิงเรียด, ยิงต่ำ"
+                            className="h-9 px-3 rounded-md text-sm outline-none"
+                            style={{ border: "1px solid var(--border)", backgroundColor: "var(--card)", color: "var(--foreground)" }}
+                          />
+                        </label>
+                      </div>
+                      <label className="flex flex-col gap-1 text-[11px] font-medium" style={{ color: "var(--muted-foreground)" }}>
+                        คำตอบของ Bot
+                        <textarea
+                          value={answer.text}
+                          onChange={(event) => patchAnswer(answer.id, { text: event.target.value })}
+                          rows={3}
+                          placeholder="ใส่คำตอบที่ต้องการให้ Bot ส่ง โดยไม่ต้องเรียก AI"
+                          className="rounded-md px-3 py-2 text-sm resize-y outline-none"
+                          style={{ border: "1px solid var(--border)", backgroundColor: "var(--card)", color: "var(--foreground)" }}
+                        />
+                      </label>
+                      <div className="flex justify-end">
+                        <button type="button" onClick={() => removeManualContent(answer.id)} className="text-xs" style={{ color: "var(--primary)" }}>ลบ Content นี้</button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </section>
+
+          <div>
+            <h3 className="text-xs font-semibold" style={{ color: "var(--foreground)" }}>FAQ buttons</h3>
+            <p className="text-[10px] mt-0.5" style={{ color: "var(--muted-foreground)" }}>คำถามลัดที่แสดงเหนือช่องแชท</p>
+          </div>
+
           <div className="grid md:grid-cols-2 gap-2">
             {faqConfigs.map((faq) => {
               const topic = KNOWLEDGE.find((k) => k.topicId === faq.topicId);
+              const manualTopic = manualAnswers.find((answer) => answer.id === faq.topicId);
               const secondaryTopic = faq.secondaryTopicId ? KNOWLEDGE.find((k) => k.topicId === faq.secondaryTopicId) : undefined;
+              const manualSecondaryTopic = faq.secondaryTopicId ? manualAnswers.find((answer) => answer.id === faq.secondaryTopicId) : undefined;
               return (
                 <div key={faq.id} className="rounded-lg border p-3" style={{ borderColor: "var(--border)", backgroundColor: "var(--card)" }}>
                   <div className="flex items-start gap-2">
@@ -3092,6 +3477,9 @@ function AdminContentLibrary({
                     className="w-full mt-1.5 h-8 px-2 rounded-md text-[11px]"
                     style={{ border: "1px solid var(--border)", backgroundColor: "var(--background)", color: "var(--foreground)" }}
                   >
+                    {manualAnswers.length > 0 && <option disabled>— Manual Content —</option>}
+                    {manualAnswers.map((answer) => <option key={answer.id} value={answer.id}>MANUAL · {answer.title}</option>)}
+                    <option disabled>— Education Hub —</option>
                     {KNOWLEDGE.map((k) => <option key={k.topicId} value={k.topicId}>{k.topicId} · {k.title}</option>)}
                   </select>
                   {faq.secondaryTopicId !== undefined && (
@@ -3102,6 +3490,9 @@ function AdminContentLibrary({
                       className="w-full mt-1.5 h-8 px-2 rounded-md text-[11px]"
                       style={{ border: "1px solid var(--border)", backgroundColor: "var(--background)", color: "var(--foreground)" }}
                     >
+                      {manualAnswers.length > 0 && <option disabled>— Manual Content —</option>}
+                      {manualAnswers.map((answer) => <option key={answer.id} value={answer.id}>MANUAL · {answer.title}</option>)}
+                      <option disabled>— Education Hub —</option>
                       {KNOWLEDGE.map((k) => <option key={k.topicId} value={k.topicId}>{k.topicId} · {k.title}</option>)}
                     </select>
                   )}
@@ -3124,8 +3515,9 @@ function AdminContentLibrary({
                       </button>
                     )}
                   </div>
-                  {topic ? <p className="text-[10px] mt-1 truncate" style={{ color: "var(--primary)" }}>
-                    {topic.title}{secondaryTopic ? ` + ${secondaryTopic.title}` : ""}
+                  {topic || manualTopic ? <p className="text-[10px] mt-1 truncate" style={{ color: "var(--primary)" }}>
+                    {topic?.title ?? manualTopic?.title}
+                    {secondaryTopic || manualSecondaryTopic ? ` + ${secondaryTopic?.title ?? manualSecondaryTopic?.title}` : ""}
                   </p> : null}
                 </div>
               );
@@ -3186,7 +3578,7 @@ function AdminContentLibrary({
         </div>
 
         <p className="px-5 py-2 text-xs shrink-0" style={{ color: "var(--muted-foreground)", borderTop: "1px solid var(--border)" }}>
-          {filtered.length} / {KNOWLEDGE.length} หัวข้อ
+          {filtered.length + filteredManualAnswers.length} หัวข้อ · Manual {manualAnswers.length} · Education Hub {KNOWLEDGE.length}
         </p>
       </div>
 
@@ -3567,7 +3959,6 @@ function AdminPreview({ deliveryPlans }: { deliveryPlans: DailyDeliveryPlan[] })
   const plan = deliveryPlans.find((p) => p.day === previewDay && p.channel === previewChannel)
     ?? deliveryPlans.find((p) => p.day === previewDay)
     ?? deliveryPlans[0];
-  const linkedTopic = plan.contentId ? KNOWLEDGE.find((k) => k.topicId === plan.contentId) : undefined;
 
   return (
     <div className="flex-1 overflow-hidden flex flex-col">
@@ -3637,7 +4028,7 @@ function AdminPreview({ deliveryPlans }: { deliveryPlans: DailyDeliveryPlan[] })
           style={{ borderRight: "1px solid var(--border)" }}
         >
           <p className="text-[11px] font-semibold uppercase tracking-wider" style={{ color: "var(--muted-foreground)" }}>
-            Delivery Rule
+            Conversation logic
           </p>
           <div className="flex flex-col gap-3 text-xs">
             <div>
@@ -3649,21 +4040,22 @@ function AdminPreview({ deliveryPlans }: { deliveryPlans: DailyDeliveryPlan[] })
               <p className="mt-0.5 capitalize" style={{ color: "var(--foreground)" }}>{plan.channel}</p>
             </div>
             <div>
-              <p className="font-medium" style={{ color: "var(--muted-foreground)" }}>Trigger</p>
-              <p className="mt-0.5" style={{ color: "var(--foreground)" }}>{plan.trigger.replace(/_/g, " ")}</p>
-              <p className="mt-1 leading-relaxed" style={{ color: "var(--muted-foreground)" }}>{plan.triggerDetail}</p>
-            </div>
-            <div>
-              <p className="font-medium" style={{ color: "var(--muted-foreground)" }}>Message</p>
+              <p className="font-medium" style={{ color: "var(--muted-foreground)" }}>Welcome message</p>
               <p className="mt-0.5 leading-relaxed" style={{ color: "var(--foreground)" }}>{plan.message}</p>
             </div>
-            {linkedTopic && (
-              <div>
-                <p className="font-medium" style={{ color: "var(--muted-foreground)" }}>Linked content</p>
-                <p className="mt-0.5 font-mono text-[10px]" style={{ color: "var(--muted-foreground)" }}>{linkedTopic.topicId}</p>
-                <p className="mt-0.5" style={{ color: "var(--foreground)" }}>{linkedTopic.title}</p>
+            <div>
+              <p className="font-medium" style={{ color: "var(--muted-foreground)" }}>Choices</p>
+              <div className="mt-1 flex flex-col gap-1">
+                {plan.branches.map((branch, index) => (
+                  <p key={branch.id} className="text-[10px] leading-relaxed" style={{ color: "var(--foreground)" }}>
+                    {index === 0 ? "IF" : "ELSE IF"} · {branch.choice || "ยังไม่มีตัวเลือก"}
+                  </p>
+                ))}
+                <p className="text-[10px] leading-relaxed" style={{ color: "var(--foreground)" }}>
+                  ELSE · {plan.elseAction === "ai_fallback" ? "AI fallback" : plan.elseReply || "ยังไม่มีข้อความ"}
+                </p>
               </div>
-            )}
+            </div>
             <div>
               <p className="font-medium" style={{ color: "var(--muted-foreground)" }}>Status</p>
               <span
@@ -3702,16 +4094,9 @@ function AdminPreview({ deliveryPlans }: { deliveryPlans: DailyDeliveryPlan[] })
                       <span className="text-sm font-semibold leading-snug" style={{ color: "var(--foreground)" }}>
                         FCO Rookie Coach
                       </span>
-                      <span className="text-[11px] shrink-0" style={{ color: "var(--muted-foreground)" }}>
-                        Trigger: {plan.trigger.replace(/_/g, " ")}
-                      </span>
+                      <span className="text-[11px] shrink-0" style={{ color: "var(--muted-foreground)" }}>ข้อความใหม่</span>
                     </div>
                     <p className="text-xs mt-1 leading-relaxed" style={{ color: "var(--muted-foreground)" }}>{plan.message}</p>
-                    {linkedTopic && (
-                      <div className="mt-3">
-                        <KnowledgeCard item={linkedTopic} />
-                      </div>
-                    )}
                   </div>
                 </div>
               </div>
@@ -3729,13 +4114,13 @@ function AdminPreview({ deliveryPlans }: { deliveryPlans: DailyDeliveryPlan[] })
                     {plan.message}
                   </div>
                 </div>
-                {linkedTopic && (
-                  <div className="flex justify-start">
-                    <div className="max-w-[80%]">
-                      <KnowledgeCard item={linkedTopic} />
-                    </div>
-                  </div>
-                )}
+                <div className="flex flex-wrap gap-2 pl-1">
+                  {plan.branches.filter((branch) => branch.choice.trim()).map((branch) => (
+                    <span key={branch.id} className="h-8 px-3 rounded-full text-xs flex items-center border" style={{ borderColor: "var(--border)", color: "var(--foreground)", backgroundColor: "var(--card)" }}>
+                      {branch.choice}
+                    </span>
+                  ))}
+                </div>
               </div>
 
               {/* Sticky footer — FAQ + composer (static) */}
@@ -4673,6 +5058,7 @@ export default function App() {
       onReportQuestion={handleReportQuestion}
       answerConfigs={answerConfigs}
       faqConfigs={faqConfigs}
+      deliveryPlans={deliveryPlans}
     />
   );
 }
