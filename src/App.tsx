@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from "react";
-import { MessageCircle, LogOut, Send, Globe, Play, BookOpen, GitBranch, Eye, Search, ExternalLink, Clock, LockKeyhole, Keyboard, Gamepad2, History } from "lucide-react";
+import { MessageCircle, LogOut, Send, Globe, Play, BookOpen, GitBranch, Eye, Search, ExternalLink, Clock, LockKeyhole, Keyboard, Gamepad2, History, Bell, Trash2 } from "lucide-react";
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -121,10 +121,15 @@ interface DailyDeliveryPlan {
   elseAction: "reply" | "next_question" | "ai_fallback";
   elseReply: string;
   elseNextPlanId?: string;
+  notificationTime?: string;
+  notificationContentId?: string;
+  notificationUnread?: boolean;
+  notificationManaged?: boolean;
+  notificationHidden?: boolean;
   status: "active" | "draft";
 }
 
-type AdminTab = "overview" | "proactive-messages" | "faq-content" | "unanswered" | "preview" | "history";
+type AdminTab = "overview" | "proactive-messages" | "notifications" | "faq-content" | "unanswered" | "preview" | "history";
 
 interface ReportedQuestion {
   id: string;
@@ -1653,33 +1658,20 @@ function AdminLoginScreen({ onAuthenticated }: { onAuthenticated: () => void }) 
   );
 }
 
-// ── Notification mock data ─────────────────────────────────────────────────────
+// ── Notification projection ────────────────────────────────────────────────────
 
-const INITIAL_NOTIFICATIONS: AppNotification[] = [
-  {
-    id: "notif-1",
-    title: "มีอะไรติดก่อนลงสนามไหม?",
-    body: "บอกโค้ชได้เลยว่าติดเรื่องปุ่ม เมนู หรือการเริ่มแมตช์ แล้วค่อยเปิดเนื้อหาที่ตรงกับคุณ",
-    time: "วันนี้ 09:00",
-    read: true,
-    topicId: "passing",
-  },
-  {
-    id: "notif-2",
-    title: "เลือกหนึ่งเรื่องที่อยากเล่นให้ดีขึ้น",
-    body: "จะฝึกส่งบอล เกมรับ หรือจัดทีมก่อนก็ได้ โค้ชจะไม่ส่งคลิปเดิมซ้ำถ้าคุณเคยดูแล้ว",
-    time: "เมื่อวาน 10:30",
-    read: false,
-    topicId: "controller",
-  },
-  {
-    id: "notif-3",
-    title: "เป้าหมายต่อไปของคุณคืออะไร?",
-    body: "เลือกเรื่องสร้างทีม หา BP หรือเล่นกับเพื่อน เพื่อรับคำแนะนำและช่องทางต่อที่เหมาะกับคุณ",
-    time: "เมื่อวาน 18:00",
-    read: false,
-  },
-];
+function buildPlayerNotifications(plans: DailyDeliveryPlan[]): AppNotification[] {
+  return plans
+    .filter((plan) => plan.channel === "notification" && !plan.notificationHidden && plan.status === "active")
+    .map((plan) => ({
+      id: plan.id,
+      title: plan.name,
+      body: plan.message,
+      time: plan.notificationTime?.trim() || "ข้อความใหม่",
+      read: !(plan.notificationUnread ?? true),
+      topicId: plan.notificationContentId,
+    }));
+}
 
 // ── CoachScreen ────────────────────────────────────────────────────────────────
 
@@ -1699,7 +1691,7 @@ function CoachScreen({
   deliveryPlans: DailyDeliveryPlan[];
 }) {
   const [activeTab, setActiveTab] = useState<PlayerTab>("chat");
-  const [notifications, setNotifications] = useState<AppNotification[]>(INITIAL_NOTIFICATIONS);
+  const [notifications, setNotifications] = useState<AppNotification[]>(() => buildPlayerNotifications(deliveryPlans));
   const [expandedNotifId, setExpandedNotifId] = useState<string | null>(null);
 
   const [messages, setMessages] = useState<Message[]>([]);
@@ -1730,6 +1722,10 @@ function CoachScreen({
     setNotifications((prev) => prev.map((n) => n.id === id ? { ...n, read: true } : n));
     setExpandedNotifId((prev) => (prev === id ? null : id));
   }
+
+  useEffect(() => {
+    setNotifications(buildPlayerNotifications(deliveryPlans));
+  }, [deliveryPlans]);
 
   useEffect(() => {
     const firstPlan = deliveryPlans.find((plan) => plan.status === "active" && plan.channel === "chat" && plan.isStart)
@@ -2668,6 +2664,24 @@ const INITIAL_DAILY_DELIVERY_PLANS: DailyDeliveryPlan[] = [
     elseAction: "ai_fallback", elseReply: "",
     status: "draft",
   },
+  {
+    id: "notif-1", day: 1, stageId: "activation", name: "มีอะไรติดก่อนลงสนามไหม?", channel: "notification", isStart: false,
+    message: "บอกโค้ชได้เลยว่าติดเรื่องปุ่ม เมนู หรือการเริ่มแมตช์ แล้วค่อยเปิดเนื้อหาที่ตรงกับคุณ",
+    branches: [], elseAction: "reply", elseReply: "", notificationTime: "วันนี้ 09:00",
+    notificationContentId: "passing", notificationUnread: false, notificationManaged: true, status: "active",
+  },
+  {
+    id: "notif-2", day: 2, stageId: "competence", name: "เลือกหนึ่งเรื่องที่อยากเล่นให้ดีขึ้น", channel: "notification", isStart: false,
+    message: "จะฝึกส่งบอล เกมรับ หรือจัดทีมก่อนก็ได้ โค้ชจะไม่ส่งคลิปเดิมซ้ำถ้าคุณเคยดูแล้ว",
+    branches: [], elseAction: "reply", elseReply: "", notificationTime: "เมื่อวาน 10:30",
+    notificationContentId: "controller", notificationUnread: true, notificationManaged: true, status: "active",
+  },
+  {
+    id: "notif-3", day: 3, stageId: "next-goal", name: "เป้าหมายต่อไปของคุณคืออะไร?", channel: "notification", isStart: false,
+    message: "เลือกเรื่องสร้างทีม หา BP หรือเล่นกับเพื่อน เพื่อรับคำแนะนำและช่องทางต่อที่เหมาะกับคุณ",
+    branches: [], elseAction: "reply", elseReply: "", notificationTime: "เมื่อวาน 18:00",
+    notificationUnread: true, notificationManaged: true, status: "active",
+  },
 ];
 
 const INITIAL_REPORTED_QUESTIONS: ReportedQuestion[] = [
@@ -2749,7 +2763,7 @@ function normalizeDeliveryPlans(raw: unknown): DailyDeliveryPlan[] {
   const stageIds = new Set<JourneyStageId>(["activation", "competence", "next-goal"]);
   const channels = new Set<DeliveryChannel>(["notification", "chat"]);
   const statuses = new Set<DailyDeliveryPlan["status"]>(["active", "draft"]);
-  return raw.flatMap((item, planIndex) => {
+  const normalized = raw.flatMap((item, planIndex): DailyDeliveryPlan[] => {
     if (!item || typeof item !== "object") return [];
     const candidate = item as Record<string, unknown>;
     const textFields = ["id", "name", "message"];
@@ -2803,9 +2817,24 @@ function normalizeDeliveryPlans(raw: unknown): DailyDeliveryPlan[] {
       elseNextPlanId: typeof candidate.elseNextPlanId === "string" && candidate.elseNextPlanId.trim()
         ? candidate.elseNextPlanId
         : undefined,
+      notificationTime: typeof candidate.notificationTime === "string" ? candidate.notificationTime : undefined,
+      notificationContentId: typeof candidate.notificationContentId === "string" && candidate.notificationContentId.trim()
+        ? candidate.notificationContentId
+        : undefined,
+      notificationUnread: typeof candidate.notificationUnread === "boolean" ? candidate.notificationUnread : undefined,
+      notificationManaged: candidate.notificationManaged === true,
+      notificationHidden: candidate.notificationHidden === true,
       status: candidate.status as DailyDeliveryPlan["status"],
     }];
   });
+
+  const hasManagedNotificationConfig = normalized.some((plan) => plan.channel === "notification" && plan.notificationManaged);
+  if (hasManagedNotificationConfig) return normalized;
+
+  const defaultNotifications = INITIAL_DAILY_DELIVERY_PLANS
+    .filter((plan) => plan.channel === "notification")
+    .map((plan) => ({ ...plan }));
+  return [...normalized.filter((plan) => plan.channel === "chat"), ...defaultNotifications];
 }
 
 function parsePublishedSections(raw: unknown): ConfigSection[] {
@@ -2973,7 +3002,36 @@ function AdminProactiveMessages({
     setSaveState("idle");
   }
 
-  const visiblePlans = stageFilter === "all" ? plans : plans.filter((p) => p.stageId === stageFilter);
+  function removePlan(planId: string) {
+    const target = plans.find((plan) => plan.id === planId);
+    if (!target) return;
+    const inboundLinks = plans.reduce((count, plan) => (
+      count
+      + plan.branches.filter((branch) => branch.nextPlanId === planId).length
+      + (plan.elseNextPlanId === planId ? 1 : 0)
+    ), 0);
+    const linkWarning = inboundLinks > 0 ? ` มี ${inboundLinks} กิ่งที่ลิงก์มาคำถามนี้และจะถูกล้างปลายทาง` : "";
+    if (!window.confirm(`ลบ Proactive Message “${target.name}”?${linkWarning} การลบจะมีผลหลังจากกด Save changes`)) return;
+
+    setPlans((prev) => {
+      const remaining = prev.filter((plan) => plan.id !== planId);
+      const replacementStart = target.isStart
+        ? remaining.find((plan) => plan.channel === "chat" && plan.status === "active")
+          ?? remaining.find((plan) => plan.channel === "chat")
+        : undefined;
+      return remaining.map((plan) => ({
+        ...plan,
+        isStart: target.isStart && plan.channel === "chat" ? plan.id === replacementStart?.id : plan.isStart,
+        branches: plan.branches.map((branch) => branch.nextPlanId === planId ? { ...branch, nextPlanId: undefined } : branch),
+        elseNextPlanId: plan.elseNextPlanId === planId ? undefined : plan.elseNextPlanId,
+      }));
+    });
+    setEditingId(null);
+    setSaveState("idle");
+  }
+
+  const chatPlans = plans.filter((plan) => plan.channel === "chat");
+  const visiblePlans = stageFilter === "all" ? chatPlans : chatPlans.filter((p) => p.stageId === stageFilter);
   const inputCls = "h-9 px-3 rounded-md text-sm w-full";
   const inputStyle = { border: "1px solid var(--border)", backgroundColor: "var(--card)", color: "var(--foreground)", outline: "none" as const };
   const CHANNEL_LABELS: Record<DeliveryChannel, string> = { notification: "Notification", chat: "Chat" };
@@ -3112,15 +3170,9 @@ function AdminProactiveMessages({
                     </div>
                     <div className="flex flex-col gap-1.5">
                       <label className="text-xs font-medium" style={{ color: "var(--muted-foreground)" }}>Channel</label>
-                      <select
-                        value={plan.channel}
-                        onChange={(e) => patch(plan.id, { channel: e.target.value as DeliveryChannel })}
-                        className={inputCls}
-                        style={inputStyle}
-                      >
-                        <option value="notification">Notification</option>
-                        <option value="chat">Chat</option>
-                      </select>
+                      <div className={`${inputCls} flex items-center`} style={{ ...inputStyle, backgroundColor: "var(--muted)" }}>
+                        Chat · Interactive IF / ELSE flow
+                      </div>
                     </div>
                   </div>
 
@@ -3325,13 +3377,24 @@ function AdminProactiveMessages({
                         เปิดใช้งาน
                       </button>
                     </div>
-                    <button
-                      onClick={() => setEditingId(null)}
-                      className="text-xs transition-opacity hover:opacity-60"
-                      style={{ color: "var(--muted-foreground)" }}
-                    >
-                      ปิด
-                    </button>
+                    <div className="flex items-center gap-3">
+                      <button
+                        type="button"
+                        onClick={() => removePlan(plan.id)}
+                        className="text-xs font-medium flex items-center gap-1 transition-opacity hover:opacity-60"
+                        style={{ color: "var(--primary)" }}
+                      >
+                        <Trash2 size={13} aria-hidden />
+                        ลบข้อความนี้
+                      </button>
+                      <button
+                        onClick={() => setEditingId(null)}
+                        className="text-xs transition-opacity hover:opacity-60"
+                        style={{ color: "var(--muted-foreground)" }}
+                      >
+                        ปิด
+                      </button>
+                    </div>
                   </div>
                 </div>
               )}
@@ -3342,6 +3405,231 @@ function AdminProactiveMessages({
 
       <p className="text-[10px]" style={{ color: "var(--muted-foreground)" }}>
         กด Save changes เพื่อเผยแพร่ข้อความให้ผู้เล่นเห็นหลังโหลดหน้าใหม่
+      </p>
+    </div>
+  );
+}
+
+// ── AdminNotifications ─────────────────────────────────────────────────────────
+
+function AdminNotifications({
+  plans,
+  setPlans,
+  onSave,
+  configStatus,
+}: {
+  plans: DailyDeliveryPlan[];
+  setPlans: React.Dispatch<React.SetStateAction<DailyDeliveryPlan[]>>;
+  onSave: (plans: DailyDeliveryPlan[]) => Promise<void>;
+  configStatus: SharedConfigStatus;
+}) {
+  const [saveState, setSaveState] = useState<SaveState>("idle");
+  const [saveError, setSaveError] = useState("");
+  const notificationPlans = plans.filter((plan) => plan.channel === "notification" && !plan.notificationHidden);
+  const inputCls = "h-9 px-3 rounded-md text-sm w-full";
+  const inputStyle = { border: "1px solid var(--border)", backgroundColor: "var(--card)", color: "var(--foreground)", outline: "none" as const };
+
+  function patchNotification(id: string, update: Partial<DailyDeliveryPlan>) {
+    setPlans((prev) => prev.map((plan) => plan.id === id ? { ...plan, ...update } : plan));
+    setSaveState("idle");
+  }
+
+  function addNotification() {
+    const id = uid();
+    setPlans((prev) => [...prev, {
+      id,
+      day: 1,
+      stageId: "activation",
+      name: "Notification ใหม่",
+      channel: "notification",
+      isStart: false,
+      message: "",
+      branches: [],
+      elseAction: "reply",
+      elseReply: "",
+      notificationTime: "วันนี้ 09:00",
+      notificationUnread: true,
+      notificationManaged: true,
+      status: "draft",
+    }]);
+    setSaveState("idle");
+  }
+
+  function removeNotification(id: string) {
+    if (!window.confirm("ลบ Notification นี้? การลบจะมีผลหลังจากกด Save changes")) return;
+    setPlans((prev) => prev.filter((plan) => plan.id !== id));
+    setSaveState("idle");
+  }
+
+  async function saveChanges() {
+    setSaveState("saving");
+    setSaveError("");
+    try {
+      const visibleNotifications = plans.filter((plan) => plan.channel === "notification" && !plan.notificationHidden);
+      const withoutNotificationPlaceholders = plans.filter((plan) => !(plan.channel === "notification" && plan.notificationHidden));
+      const payloadPlans = visibleNotifications.length > 0
+        ? withoutNotificationPlaceholders.map((plan) => plan.channel === "notification" ? { ...plan, notificationManaged: true } : plan)
+        : [...withoutNotificationPlaceholders, {
+            id: "notifications-empty",
+            day: 1 as DeliveryDay,
+            stageId: "activation" as JourneyStageId,
+            name: "",
+            channel: "notification" as DeliveryChannel,
+            isStart: false,
+            message: "",
+            branches: [],
+            elseAction: "reply" as const,
+            elseReply: "",
+            notificationManaged: true,
+            notificationHidden: true,
+            status: "draft" as const,
+          }];
+      setPlans(() => payloadPlans);
+      await onSave(payloadPlans);
+      setSaveState("saved");
+    } catch (error) {
+      setSaveState("error");
+      setSaveError(error instanceof Error ? error.message : "ไม่สามารถบันทึก Notification ได้");
+    }
+  }
+
+  return (
+    <div className="flex-1 overflow-y-auto p-6 flex flex-col gap-5 max-w-5xl">
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <h2 className="text-base font-semibold" style={{ color: "var(--foreground)" }}>Notifications</h2>
+          <p className="text-xs mt-1" style={{ color: "var(--muted-foreground)" }}>
+            จัดการข้อความในกล่องแจ้งเตือน แยกจาก Proactive Chat flow
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          <SaveChangesButton state={saveState} onClick={saveChanges} disabled={configStatus !== "ready"} />
+          <button
+            type="button"
+            onClick={addNotification}
+            className="h-9 px-4 rounded-lg text-xs font-semibold"
+            style={{ backgroundColor: "var(--muted)", color: "var(--foreground)" }}
+          >
+            + เพิ่ม Notification
+          </button>
+        </div>
+      </div>
+
+      {configStatus !== "ready" && (
+        <p className="text-xs" style={{ color: "var(--primary)" }}>
+          {configStatus === "loading" ? "กำลังเชื่อม shared storage..." : "ยังไม่ได้เชื่อม shared storage · การแก้ไขจะอยู่ใน browser นี้เท่านั้น"}
+        </p>
+      )}
+      {saveError && <p className="text-xs" style={{ color: "var(--primary)" }}>{saveError}</p>}
+
+      <div className="rounded-lg border px-4 py-3 text-xs" style={{ borderColor: "var(--border)", backgroundColor: "var(--muted)", color: "var(--muted-foreground)" }}>
+        Day เป็นข้อมูลหลังบ้านเท่านั้น ส่วนข้อความเวลาเป็นสิ่งที่ผู้เล่นเห็น เช่น “วันนี้ 09:00” ระบบ MVP จะแสดง Notification ที่ Active เมื่อผู้เล่นโหลดหน้าใหม่
+      </div>
+
+      {notificationPlans.length === 0 ? (
+        <div className="rounded-xl border p-8 text-center" style={{ borderColor: "var(--border)", backgroundColor: "var(--card)" }}>
+          <Bell className="mx-auto mb-3" size={22} style={{ color: "var(--muted-foreground)" }} aria-hidden />
+          <p className="text-sm font-semibold" style={{ color: "var(--foreground)" }}>ยังไม่มี Notification</p>
+          <p className="text-xs mt-1" style={{ color: "var(--muted-foreground)" }}>เพิ่มรายการแรก แล้วกด Save changes เพื่อเผยแพร่</p>
+        </div>
+      ) : (
+        <div className="flex flex-col gap-3">
+          {notificationPlans.map((plan) => (
+            <div key={plan.id} className="rounded-xl border p-4 flex flex-col gap-4" style={{ borderColor: "var(--border)", backgroundColor: "var(--background)" }}>
+              <div className="flex items-center gap-2">
+                <Bell size={15} style={{ color: "var(--primary)" }} aria-hidden />
+                <span className="text-xs font-semibold flex-1 truncate" style={{ color: "var(--foreground)" }}>{plan.name || "Notification ไม่มีชื่อ"}</span>
+                <span className="text-[10px] px-2 py-0.5 rounded-full" style={{ backgroundColor: "var(--muted)", color: "var(--muted-foreground)" }}>Day {plan.day}</span>
+                <span className="text-[10px] px-2 py-0.5 rounded-full font-semibold" style={{ backgroundColor: plan.status === "active" ? "rgba(43,108,58,0.12)" : "var(--muted)", color: plan.status === "active" ? "var(--accent)" : "var(--muted-foreground)" }}>
+                  {plan.status === "active" ? "Active" : "Draft"}
+                </span>
+                <button type="button" onClick={() => removeNotification(plan.id)} aria-label={`ลบ ${plan.name}`} className="p-1.5 rounded-md" style={{ color: "var(--primary)" }}>
+                  <Trash2 size={14} aria-hidden />
+                </button>
+              </div>
+
+              <div className="grid md:grid-cols-3 gap-3">
+                <label className="flex flex-col gap-1 text-[11px] font-medium" style={{ color: "var(--muted-foreground)" }}>
+                  Journey day (หลังบ้าน)
+                  <select
+                    value={plan.day}
+                    onChange={(event) => {
+                      const day = Number(event.target.value) as DeliveryDay;
+                      const stageId: JourneyStageId = day === 1 ? "activation" : day === 2 ? "competence" : "next-goal";
+                      patchNotification(plan.id, { day, stageId });
+                    }}
+                    className={inputCls}
+                    style={inputStyle}
+                  >
+                    <option value={1}>Day 1</option>
+                    <option value={2}>Day 2</option>
+                    <option value={3}>Day 3</option>
+                  </select>
+                </label>
+                <label className="flex flex-col gap-1 text-[11px] font-medium" style={{ color: "var(--muted-foreground)" }}>
+                  เวลาที่ผู้เล่นเห็น
+                  <input
+                    value={plan.notificationTime ?? ""}
+                    onChange={(event) => patchNotification(plan.id, { notificationTime: event.target.value })}
+                    placeholder="เช่น วันนี้ 09:00"
+                    className={inputCls}
+                    style={inputStyle}
+                  />
+                </label>
+                <label className="flex flex-col gap-1 text-[11px] font-medium" style={{ color: "var(--muted-foreground)" }}>
+                  สถานะ
+                  <select value={plan.status} onChange={(event) => patchNotification(plan.id, { status: event.target.value as DailyDeliveryPlan["status"] })} className={inputCls} style={inputStyle}>
+                    <option value="draft">Draft</option>
+                    <option value="active">Active</option>
+                  </select>
+                </label>
+              </div>
+
+              <label className="flex flex-col gap-1 text-[11px] font-medium" style={{ color: "var(--muted-foreground)" }}>
+                หัวข้อแจ้งเตือน
+                <input value={plan.name} onChange={(event) => patchNotification(plan.id, { name: event.target.value })} className={inputCls} style={inputStyle} />
+              </label>
+
+              <label className="flex flex-col gap-1 text-[11px] font-medium" style={{ color: "var(--muted-foreground)" }}>
+                รายละเอียด
+                <textarea
+                  value={plan.message}
+                  onChange={(event) => patchNotification(plan.id, { message: event.target.value })}
+                  rows={3}
+                  className="px-3 py-2 rounded-md text-sm resize-none"
+                  style={{ ...inputStyle, lineHeight: "1.6" }}
+                />
+              </label>
+
+              <div className="grid md:grid-cols-[1fr_auto] gap-4 items-end">
+                <label className="flex flex-col gap-1 text-[11px] font-medium" style={{ color: "var(--muted-foreground)" }}>
+                  Content เมื่อผู้เล่นเปิด Notification (ไม่บังคับ)
+                  <select
+                    value={plan.notificationContentId ?? ""}
+                    onChange={(event) => patchNotification(plan.id, { notificationContentId: event.target.value || undefined })}
+                    className={inputCls}
+                    style={inputStyle}
+                  >
+                    <option value="">— ไม่แนบ Content —</option>
+                    {KNOWLEDGE.map((item) => <option key={item.id} value={item.id}>{item.topicId} · {item.title}</option>)}
+                  </select>
+                </label>
+                <label className="h-9 px-3 rounded-md border flex items-center gap-2 text-xs cursor-pointer" style={{ borderColor: "var(--border)", color: "var(--foreground)", backgroundColor: "var(--card)" }}>
+                  <input
+                    type="checkbox"
+                    checked={plan.notificationUnread ?? true}
+                    onChange={(event) => patchNotification(plan.id, { notificationUnread: event.target.checked })}
+                  />
+                  แสดงจุดข้อความใหม่
+                </label>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <p className="text-[10px]" style={{ color: "var(--muted-foreground)" }}>
+        กด Save changes เพื่อเผยแพร่ Notification ให้ผู้เล่นเห็นหลังโหลดหน้าใหม่
       </p>
     </div>
   );
@@ -4087,7 +4375,7 @@ function AdminPreview({ deliveryPlans }: { deliveryPlans: DailyDeliveryPlan[] })
   const [previewChannel, setPreviewChannel] = useState<DeliveryChannel>("notification");
 
   const plan = deliveryPlans.find((p) => p.day === previewDay && p.channel === previewChannel)
-    ?? deliveryPlans.find((p) => p.day === previewDay)
+    ?? deliveryPlans.find((p) => p.channel === previewChannel)
     ?? deliveryPlans[0];
 
   return (
@@ -4169,29 +4457,54 @@ function AdminPreview({ deliveryPlans }: { deliveryPlans: DailyDeliveryPlan[] })
               <p className="font-medium" style={{ color: "var(--muted-foreground)" }}>Channel</p>
               <p className="mt-0.5 capitalize" style={{ color: "var(--foreground)" }}>{plan.channel}</p>
             </div>
-            <div>
-              <p className="font-medium" style={{ color: "var(--muted-foreground)" }}>{plan.isStart ? "Welcome message" : "Question / Bot message"}</p>
-              <p className="mt-0.5 leading-relaxed" style={{ color: "var(--foreground)" }}>{plan.message}</p>
-            </div>
-            <div>
-              <p className="font-medium" style={{ color: "var(--muted-foreground)" }}>Choices</p>
-              <div className="mt-1 flex flex-col gap-1">
-                {plan.branches.map((branch, index) => (
-                  <p key={branch.id} className="text-[10px] leading-relaxed" style={{ color: "var(--foreground)" }}>
-                    {index === 0 ? "IF" : "ELSE IF"} · {branch.choice || "ยังไม่มีตัวเลือก"} → {branch.action === "next_question"
-                      ? `คำถาม: ${deliveryPlans.find((target) => target.id === branch.nextPlanId)?.name ?? "ยังไม่ได้เลือก"}`
-                      : branch.reply || "ยังไม่มีข้อความ"}
+            {previewChannel === "notification" ? (
+              <>
+                <div>
+                  <p className="font-medium" style={{ color: "var(--muted-foreground)" }}>Title</p>
+                  <p className="mt-0.5 leading-relaxed" style={{ color: "var(--foreground)" }}>{plan.name}</p>
+                </div>
+                <div>
+                  <p className="font-medium" style={{ color: "var(--muted-foreground)" }}>Body</p>
+                  <p className="mt-0.5 leading-relaxed" style={{ color: "var(--foreground)" }}>{plan.message}</p>
+                </div>
+                <div>
+                  <p className="font-medium" style={{ color: "var(--muted-foreground)" }}>Visible time</p>
+                  <p className="mt-0.5" style={{ color: "var(--foreground)" }}>{plan.notificationTime || "ข้อความใหม่"}</p>
+                </div>
+                <div>
+                  <p className="font-medium" style={{ color: "var(--muted-foreground)" }}>Attached content</p>
+                  <p className="mt-0.5" style={{ color: "var(--foreground)" }}>
+                    {findKnowledge(plan.notificationContentId ?? "")?.title ?? "ไม่แนบ Content"}
                   </p>
-                ))}
-                <p className="text-[10px] leading-relaxed" style={{ color: "var(--foreground)" }}>
-                  ELSE · {plan.elseAction === "ai_fallback"
-                    ? "AI fallback"
-                    : plan.elseAction === "next_question"
-                      ? `คำถาม: ${deliveryPlans.find((target) => target.id === plan.elseNextPlanId)?.name ?? "ยังไม่ได้เลือก"}`
-                      : plan.elseReply || "ยังไม่มีข้อความ"}
-                </p>
-              </div>
-            </div>
+                </div>
+              </>
+            ) : (
+              <>
+                <div>
+                  <p className="font-medium" style={{ color: "var(--muted-foreground)" }}>{plan.isStart ? "Welcome message" : "Question / Bot message"}</p>
+                  <p className="mt-0.5 leading-relaxed" style={{ color: "var(--foreground)" }}>{plan.message}</p>
+                </div>
+                <div>
+                  <p className="font-medium" style={{ color: "var(--muted-foreground)" }}>Choices</p>
+                  <div className="mt-1 flex flex-col gap-1">
+                    {plan.branches.map((branch, index) => (
+                      <p key={branch.id} className="text-[10px] leading-relaxed" style={{ color: "var(--foreground)" }}>
+                        {index === 0 ? "IF" : "ELSE IF"} · {branch.choice || "ยังไม่มีตัวเลือก"} → {branch.action === "next_question"
+                          ? `คำถาม: ${deliveryPlans.find((target) => target.id === branch.nextPlanId)?.name ?? "ยังไม่ได้เลือก"}`
+                          : branch.reply || "ยังไม่มีข้อความ"}
+                      </p>
+                    ))}
+                    <p className="text-[10px] leading-relaxed" style={{ color: "var(--foreground)" }}>
+                      ELSE · {plan.elseAction === "ai_fallback"
+                        ? "AI fallback"
+                        : plan.elseAction === "next_question"
+                          ? `คำถาม: ${deliveryPlans.find((target) => target.id === plan.elseNextPlanId)?.name ?? "ยังไม่ได้เลือก"}`
+                          : plan.elseReply || "ยังไม่มีข้อความ"}
+                    </p>
+                  </div>
+                </div>
+              </>
+            )}
             <div>
               <p className="font-medium" style={{ color: "var(--muted-foreground)" }}>Status</p>
               <span
@@ -4221,16 +4534,16 @@ function AdminPreview({ deliveryPlans }: { deliveryPlans: DailyDeliveryPlan[] })
                 style={{ backgroundColor: "rgba(196,30,30,0.05)", border: "1px solid rgba(196,30,30,0.2)" }}
               >
                 <div className="flex items-start gap-3">
-                  <span className="relative mt-0.5 shrink-0">
-                    <Clock size={16} style={{ color: "var(--primary)" }} aria-hidden />
-                    <span className="absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full" style={{ backgroundColor: "var(--primary)" }} />
-                  </span>
+                    <span className="relative mt-0.5 shrink-0">
+                      <Clock size={16} style={{ color: plan.notificationUnread === false ? "var(--muted-foreground)" : "var(--primary)" }} aria-hidden />
+                      {plan.notificationUnread !== false && <span className="absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full" style={{ backgroundColor: "var(--primary)" }} />}
+                    </span>
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center justify-between gap-2">
                       <span className="text-sm font-semibold leading-snug" style={{ color: "var(--foreground)" }}>
-                        FCO Rookie Coach
+                        {plan.name}
                       </span>
-                      <span className="text-[11px] shrink-0" style={{ color: "var(--muted-foreground)" }}>ข้อความใหม่</span>
+                      <span className="text-[11px] shrink-0" style={{ color: "var(--muted-foreground)" }}>{plan.notificationTime || "ข้อความใหม่"}</span>
                     </div>
                     <p className="text-xs mt-1 leading-relaxed" style={{ color: "var(--muted-foreground)" }}>{plan.message}</p>
                   </div>
@@ -4652,7 +4965,7 @@ function AdminVersionHistory({
 
   const sectionLabel = (value: string) => {
     if (value === "faq_content") return "FAQ & Content";
-    if (value === "proactive_messages") return "Proactive Messages";
+    if (value === "proactive_messages") return "Proactive Messages & Notifications";
     if (value === "initial") return "Initial configuration";
     if (value.startsWith("rollback:")) return `Rollback from Version ${value.replace("rollback:", "")}`;
     return value;
@@ -4755,6 +5068,7 @@ function AdminView({
   const navItems: { key: AdminTab; label: string; icon: React.ReactNode; badge?: number }[] = [
     { key: "overview", label: "Overview", icon: <Eye size={15} aria-hidden /> },
     { key: "proactive-messages", label: "Proactive Messages", icon: <MessageCircle size={15} aria-hidden /> },
+    { key: "notifications", label: "Notifications", icon: <Bell size={15} aria-hidden /> },
     { key: "faq-content", label: "FAQ & Content", icon: <BookOpen size={15} aria-hidden /> },
     { key: "unanswered", label: "Unanswered Questions", icon: <Search size={15} aria-hidden />, badge: newCount },
     { key: "preview", label: "Preview", icon: <GitBranch size={15} aria-hidden /> },
@@ -4820,6 +5134,14 @@ function AdminView({
         {tab === "overview" && <AdminOverview plans={deliveryPlans} reportedQuestions={reportedQuestions} />}
         {tab === "proactive-messages" && (
           <AdminProactiveMessages
+            plans={deliveryPlans}
+            setPlans={setDeliveryPlans}
+            onSave={onSaveProactiveMessages}
+            configStatus={configStatus}
+          />
+        )}
+        {tab === "notifications" && (
+          <AdminNotifications
             plans={deliveryPlans}
             setPlans={setDeliveryPlans}
             onSave={onSaveProactiveMessages}

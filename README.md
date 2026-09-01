@@ -28,6 +28,7 @@ The fallback prompt and response contract are documented in [`docs/AI-INSEA-FALL
 Supabase is the shared source of truth for the production deployment.
 
 - `Proactive Messages` uses a linked `Welcome message → IF / ELSE IF / ELSE` flow. Every branch explicitly returns fixed text or opens another proactive question; `ELSE` can also use AI fallback. Messages never advance by list order.
+- `Notifications` is a separate Admin surface for notification title, body, visible time label, journey-day metadata, attached Education Hub content, unread dot, and Active/Draft status. It shares the versioned `delivery_plans` payload with chat flows, so no additional Supabase migration is required.
 - `FAQ & Content`, `Proactive Messages`, and `Unanswered Questions` each use an explicit **Save changes** action. Edits are drafts until that button is pressed.
 - Players receive the published FAQ/content and proactive configuration after their next page load. Responses are not CDN-cached, so a fresh load shows the current published version.
 - Every published FAQ/content or proactive change writes a full configuration snapshot. Admins can inspect **Version History** and restore an earlier configuration; a rollback itself is saved as a new version.
