@@ -103,7 +103,9 @@ interface ProactiveBranch {
   id: string;
   kind: "if" | "elseif";
   choice: string;
+  action: "reply" | "next_question";
   reply: string;
+  nextPlanId?: string;
   contentId?: string;
 }
 
@@ -113,10 +115,12 @@ interface DailyDeliveryPlan {
   stageId: JourneyStageId;
   name: string;
   channel: DeliveryChannel;
+  isStart: boolean;
   message: string;
   branches: ProactiveBranch[];
-  elseAction: "reply" | "ai_fallback";
+  elseAction: "reply" | "next_question" | "ai_fallback";
   elseReply: string;
+  elseNextPlanId?: string;
   status: "active" | "draft";
 }
 
@@ -1728,7 +1732,8 @@ function CoachScreen({
   }
 
   useEffect(() => {
-    const firstPlan = deliveryPlans.find((plan) => plan.status === "active" && plan.channel === "chat");
+    const firstPlan = deliveryPlans.find((plan) => plan.status === "active" && plan.channel === "chat" && plan.isStart)
+      ?? deliveryPlans.find((plan) => plan.status === "active" && plan.channel === "chat");
     setMessages([
       {
         id: uid(),
@@ -1866,13 +1871,23 @@ function CoachScreen({
     }, 450);
   }
 
-  function handleProactiveChoice(plan: DailyDeliveryPlan, branch: ProactiveBranch) {
+  function handleProactiveChoice(branch: ProactiveBranch) {
     setChipMode(null);
     append([{ role: "user", text: branch.choice }]);
-    const currentIndex = activeChatPlans.findIndex((candidate) => candidate.id === plan.id);
-    const nextPlan = currentIndex >= 0 ? activeChatPlans[currentIndex + 1] : undefined;
 
     botDelay(() => {
+      if (branch.action === "next_question") {
+        const nextPlan = activeChatPlans.find((candidate) => candidate.id === branch.nextPlanId);
+        if (nextPlan) {
+          append([{ role: "assistant", text: nextPlan.message.trim() || "คำถามนี้ยังไม่มีข้อความ" }]);
+          setActiveProactivePlanId(nextPlan.id);
+        } else {
+          append([{ role: "assistant", text: "คำตอบนี้ยังไม่ได้ลิงก์ไปยังคำถามถัดไป กรุณาพิมพ์สิ่งที่อยากรู้ได้เลยครับ" }]);
+          setActiveProactivePlanId(null);
+        }
+        return;
+      }
+
       const replies: Omit<Message, "id">[] = [];
       if (branch.reply.trim()) replies.push({ role: "assistant", text: branch.reply.trim() });
 
@@ -1890,11 +1905,8 @@ function CoachScreen({
         }
       }
 
-      if (nextPlan && nextPlan.message.trim() && nextPlan.message.trim() !== branch.reply.trim()) {
-        replies.push({ role: "assistant", text: nextPlan.message.trim() });
-      }
       if (replies.length > 0) append(replies);
-      setActiveProactivePlanId(nextPlan?.id ?? null);
+      setActiveProactivePlanId(null);
     }, 450);
   }
 
@@ -2015,6 +2027,19 @@ function CoachScreen({
     setActiveProactivePlanId(null);
     append([{ role: "user", text }]);
     setIsTyping(true);
+    if (currentProactivePlan?.elseAction === "next_question") {
+      const nextPlan = activeChatPlans.find((candidate) => candidate.id === currentProactivePlan.elseNextPlanId);
+      setTimeout(() => {
+        setIsTyping(false);
+        if (nextPlan) {
+          append([{ role: "assistant", text: nextPlan.message.trim() || "คำถามนี้ยังไม่มีข้อความ" }]);
+          setActiveProactivePlanId(nextPlan.id);
+        } else {
+          append([{ role: "assistant", text: "ELSE ยังไม่ได้ลิงก์ไปยังคำถามถัดไป กรุณาพิมพ์สิ่งที่อยากรู้ได้เลยครับ" }]);
+        }
+      }, 450);
+      return;
+    }
     if (currentProactivePlan?.elseAction === "reply" && currentProactivePlan.elseReply.trim()) {
       setTimeout(() => {
         setIsTyping(false);
@@ -2109,7 +2134,7 @@ function CoachScreen({
   const activeChips = activeProactivePlan
     ? activeProactivePlan.branches
         .filter((branch) => branch.choice.trim())
-        .map((branch) => ({ label: branch.choice, action: () => handleProactiveChoice(activeProactivePlan, branch) }))
+        .map((branch) => ({ label: branch.choice, action: () => handleProactiveChoice(branch) }))
     : chipMode ? chipSets[chipMode] : [];
 
   return (
@@ -2566,68 +2591,79 @@ const INITIAL_FLOWS: ContentFlow[] = [
 
 const INITIAL_DAILY_DELIVERY_PLANS: DailyDeliveryPlan[] = [
   {
-    id: "pm-1", day: 1, stageId: "activation", name: "เช็กว่าเล่นเกมแรกหรือยัง", channel: "chat",
+    id: "pm-1", day: 1, stageId: "activation", name: "เช็กว่าเล่นเกมแรกหรือยัง", channel: "chat", isStart: true,
     message: "เล่นเกมแรกไปแล้วหรือยัง?",
     branches: [
-      { id: "pm-1-if", kind: "if", choice: "ยังไม่ได้เล่น", reply: "อยากเริ่มเล่นโหมดไหน?" },
-      { id: "pm-1-elseif", kind: "elseif", choice: "เล่นแล้ว", reply: "เกมแรกที่เล่นเป็นโหมดไหน?" },
+      { id: "pm-1-if", kind: "if", choice: "ยังไม่ได้เล่น", action: "next_question", reply: "", nextPlanId: "pm-2-start" },
+      { id: "pm-1-elseif", kind: "elseif", choice: "เล่นแล้ว", action: "next_question", reply: "", nextPlanId: "pm-2" },
     ],
     elseAction: "ai_fallback", elseReply: "",
     status: "active",
   },
   {
-    id: "pm-2", day: 1, stageId: "activation", name: "ถามโหมดที่เพิ่งเล่น", channel: "chat",
+    id: "pm-2-start", day: 1, stageId: "activation", name: "ถามโหมดที่อยากเริ่ม", channel: "chat", isStart: false,
+    message: "อยากเริ่มเล่นโหมดไหน?",
+    branches: [
+      { id: "pm-2-start-if", kind: "if", choice: "ฝึกกับคอม", action: "reply", reply: "เริ่มจากโหมดฝึกกับคอมเพื่อทำความคุ้นเคยกับปุ่มและจังหวะเกมได้เลยครับ" },
+      { id: "pm-2-start-elseif-1", kind: "elseif", choice: "แข่งกับผู้เล่นอื่น", action: "reply", reply: "ลองฝึกพื้นฐานสั้น ๆ ก่อน แล้วค่อยเข้าโหมดแข่งกับผู้เล่นอื่นครับ" },
+      { id: "pm-2-start-elseif-2", kind: "elseif", choice: "ยังไม่แน่ใจ", action: "reply", reply: "เริ่มจากโหมดฝึกกับคอมก่อน เหมาะที่สุดสำหรับทำความคุ้นเคยกับเกมครับ" },
+    ],
+    elseAction: "ai_fallback", elseReply: "",
+    status: "active",
+  },
+  {
+    id: "pm-2", day: 1, stageId: "activation", name: "ถามโหมดที่เพิ่งเล่น", channel: "chat", isStart: false,
     message: "เกมแรกที่เล่นเป็นโหมดไหน?",
     branches: [
-      { id: "pm-2-if", kind: "if", choice: "ฝึกกับคอม", reply: "แล้วตอนเล่น ติดตรงไหนมากที่สุด?" },
-      { id: "pm-2-elseif-1", kind: "elseif", choice: "แข่งกับผู้เล่นอื่น", reply: "แล้วตอนเล่น ติดตรงไหนมากที่สุด?" },
-      { id: "pm-2-elseif-2", kind: "elseif", choice: "โหมดอื่น", reply: "พิมพ์ชื่อโหมดได้เลย แล้วตอนเล่นติดตรงไหนมากที่สุด?" },
+      { id: "pm-2-if", kind: "if", choice: "ฝึกกับคอม", action: "next_question", reply: "", nextPlanId: "pm-3" },
+      { id: "pm-2-elseif-1", kind: "elseif", choice: "แข่งกับผู้เล่นอื่น", action: "next_question", reply: "", nextPlanId: "pm-3" },
+      { id: "pm-2-elseif-2", kind: "elseif", choice: "โหมดอื่น", action: "next_question", reply: "", nextPlanId: "pm-3" },
     ],
     elseAction: "ai_fallback", elseReply: "",
     status: "active",
   },
   {
-    id: "pm-3", day: 1, stageId: "activation", name: "หาสิ่งที่ติดหลังเกมแรก", channel: "chat",
+    id: "pm-3", day: 1, stageId: "activation", name: "หาสิ่งที่ติดหลังเกมแรก", channel: "chat", isStart: false,
     message: "แล้วตอนเล่น ติดตรงไหนมากที่สุด?",
     branches: [
-      { id: "pm-3-if", kind: "if", choice: "กดปุ่มยังไม่คล่อง", reply: "ใช้คีย์บอร์ด Xbox หรือ PlayStation?", contentId: "FCO-EDU-030" },
-      { id: "pm-3-elseif-1", kind: "elseif", choice: "บุกไม่ออก / ยิงไม่เข้า", reply: "ติดที่ส่งบอล หาช่องยิง หรือยิงแล้วไม่เข้ามากกว่ากัน?", contentId: "FCO-EDU-001" },
-      { id: "pm-3-elseif-2", kind: "elseif", choice: "รับไม่ทัน / โดนแย่งบอล", reply: "ติดที่ตามคู่แข่งไม่ทัน หรือแย่งบอลแล้วฟาวล์?", contentId: "FCO-EDU-044" },
-      { id: "pm-3-elseif-3", kind: "elseif", choice: "คู่แข่งยากเกินไป", reply: "อยากฝึกเรื่องบุกหรือรับก่อน?" },
-      { id: "pm-3-elseif-4", kind: "elseif", choice: "ยังไม่ติดอะไร", reply: "ดีเลย ต่อไปอยากจัดทีม หาเงิน หรือฝึกให้คล่องขึ้น?" },
+      { id: "pm-3-if", kind: "if", choice: "กดปุ่มยังไม่คล่อง", action: "reply", reply: "ใช้คีย์บอร์ด Xbox หรือ PlayStation?", contentId: "FCO-EDU-030" },
+      { id: "pm-3-elseif-1", kind: "elseif", choice: "บุกไม่ออก / ยิงไม่เข้า", action: "reply", reply: "ติดที่ส่งบอล หาช่องยิง หรือยิงแล้วไม่เข้ามากกว่ากัน?", contentId: "FCO-EDU-001" },
+      { id: "pm-3-elseif-2", kind: "elseif", choice: "รับไม่ทัน / โดนแย่งบอล", action: "reply", reply: "ติดที่ตามคู่แข่งไม่ทัน หรือแย่งบอลแล้วฟาวล์?", contentId: "FCO-EDU-044" },
+      { id: "pm-3-elseif-3", kind: "elseif", choice: "คู่แข่งยากเกินไป", action: "reply", reply: "อยากฝึกเรื่องบุกหรือรับก่อน?" },
+      { id: "pm-3-elseif-4", kind: "elseif", choice: "ยังไม่ติดอะไร", action: "next_question", reply: "", nextPlanId: "pm-5" },
     ],
     elseAction: "ai_fallback", elseReply: "",
     status: "active",
   },
   {
-    id: "pm-4", day: 2, stageId: "competence", name: "ถามต่อหลังส่งคำตอบ", channel: "chat",
+    id: "pm-4", day: 2, stageId: "competence", name: "ถามต่อหลังส่งคำตอบ", channel: "chat", isStart: false,
     message: "ลองแล้วเป็นอย่างไรบ้าง?",
     branches: [
-      { id: "pm-4-if", kind: "if", choice: "เข้าใจแล้ว", reply: "ดีมากครับ ตอนนี้อยากพัฒนาเรื่องไหนต่อ?" },
-      { id: "pm-4-elseif-1", kind: "elseif", choice: "ยังติดอยู่", reply: "บอกผมสั้น ๆ ได้เลยว่าติดตรงปุ่มหรือจังหวะไหน" },
-      { id: "pm-4-elseif-2", kind: "elseif", choice: "เลือกเรื่องอื่น", reply: "อยากถามเรื่องไหนต่อ?" },
+      { id: "pm-4-if", kind: "if", choice: "เข้าใจแล้ว", action: "next_question", reply: "", nextPlanId: "pm-5" },
+      { id: "pm-4-elseif-1", kind: "elseif", choice: "ยังติดอยู่", action: "reply", reply: "บอกผมสั้น ๆ ได้เลยว่าติดตรงปุ่มหรือจังหวะไหน" },
+      { id: "pm-4-elseif-2", kind: "elseif", choice: "เลือกเรื่องอื่น", action: "reply", reply: "อยากถามเรื่องไหนต่อ?" },
     ],
     elseAction: "ai_fallback", elseReply: "",
     status: "active",
   },
   {
-    id: "pm-5", day: 3, stageId: "next-goal", name: "เลือกเป้าหมายถัดไป", channel: "notification",
+    id: "pm-5", day: 3, stageId: "next-goal", name: "เลือกเป้าหมายถัดไป", channel: "chat", isStart: false,
     message: "ต่อไปอยากทำอะไรใน FC Online?",
     branches: [
-      { id: "pm-5-if", kind: "if", choice: "สร้างทีมให้ดีขึ้น", reply: "เริ่มจากทีมที่มี แล้วค่อยเติมตำแหน่งที่ขาดครับ", contentId: "FCO-EDU-041" },
-      { id: "pm-5-elseif-1", kind: "elseif", choice: "หา BP และรางวัล", reply: "เริ่มจาก Welcome Pass และ Mission Hub ก่อนครับ", contentId: "FCO-EDU-018" },
-      { id: "pm-5-elseif-2", kind: "elseif", choice: "เล่นกับเพื่อน", reply: "ไปต่อที่ชุมชน FC Online Discord ได้เลยครับ" },
+      { id: "pm-5-if", kind: "if", choice: "สร้างทีมให้ดีขึ้น", action: "reply", reply: "เริ่มจากทีมที่มี แล้วค่อยเติมตำแหน่งที่ขาดครับ", contentId: "FCO-EDU-041" },
+      { id: "pm-5-elseif-1", kind: "elseif", choice: "หา BP และรางวัล", action: "reply", reply: "เริ่มจาก Welcome Pass และ Mission Hub ก่อนครับ", contentId: "FCO-EDU-018" },
+      { id: "pm-5-elseif-2", kind: "elseif", choice: "เล่นกับเพื่อน", action: "reply", reply: "ไปต่อที่ชุมชน FC Online Discord ได้เลยครับ" },
     ],
     elseAction: "ai_fallback", elseReply: "",
     status: "active",
   },
   {
-    id: "pm-6", day: 3, stageId: "next-goal", name: "ส่งต่อเมื่อยังไม่มีคำตอบ", channel: "chat",
+    id: "pm-6", day: 3, stageId: "next-goal", name: "ส่งต่อเมื่อยังไม่มีคำตอบ", channel: "chat", isStart: false,
     message: "อยากไปต่อทางไหน?",
     branches: [
-      { id: "pm-6-if", kind: "if", choice: "Education Hub", reply: "เปิด Education Hub ให้แล้วครับ" },
-      { id: "pm-6-elseif-1", kind: "elseif", choice: "Discord", reply: "เข้า Discord FC Online ได้เลยครับ" },
-      { id: "pm-6-elseif-2", kind: "elseif", choice: "ส่งคำถามให้ทีม", reply: "รับเรื่องแล้วครับ ทีมจะใช้คำถามนี้เพิ่มฐานความรู้" },
+      { id: "pm-6-if", kind: "if", choice: "Education Hub", action: "reply", reply: "เปิด Education Hub ให้แล้วครับ" },
+      { id: "pm-6-elseif-1", kind: "elseif", choice: "Discord", action: "reply", reply: "เข้า Discord FC Online ได้เลยครับ" },
+      { id: "pm-6-elseif-2", kind: "elseif", choice: "ส่งคำถามให้ทีม", action: "reply", reply: "รับเรื่องแล้วครับ ทีมจะใช้คำถามนี้เพิ่มฐานความรู้" },
     ],
     elseAction: "ai_fallback", elseReply: "",
     status: "draft",
@@ -2713,7 +2749,7 @@ function normalizeDeliveryPlans(raw: unknown): DailyDeliveryPlan[] {
   const stageIds = new Set<JourneyStageId>(["activation", "competence", "next-goal"]);
   const channels = new Set<DeliveryChannel>(["notification", "chat"]);
   const statuses = new Set<DailyDeliveryPlan["status"]>(["active", "draft"]);
-  return raw.flatMap((item) => {
+  return raw.flatMap((item, planIndex) => {
     if (!item || typeof item !== "object") return [];
     const candidate = item as Record<string, unknown>;
     const textFields = ["id", "name", "message"];
@@ -2743,7 +2779,9 @@ function normalizeDeliveryPlans(raw: unknown): DailyDeliveryPlan[] {
         id: typeof value.id === "string" ? value.id : `${candidate.id}-branch-${index}`,
         kind: index === 0 ? "if" as const : "elseif" as const,
         choice: value.choice,
+        action: value.action === "next_question" ? "next_question" as const : "reply" as const,
         reply: value.reply,
+        nextPlanId: typeof value.nextPlanId === "string" && value.nextPlanId.trim() ? value.nextPlanId : undefined,
         contentId: typeof value.contentId === "string" && value.contentId.trim() ? value.contentId : undefined,
       }];
     });
@@ -2755,12 +2793,16 @@ function normalizeDeliveryPlans(raw: unknown): DailyDeliveryPlan[] {
       stageId: candidate.stageId as JourneyStageId,
       name: candidate.name as string,
       channel: candidate.channel as DeliveryChannel,
+      isStart: typeof candidate.isStart === "boolean" ? candidate.isStart : planIndex === 0,
       message: candidate.message as string,
       branches,
-      elseAction: candidate.elseAction === "reply" || candidate.elseAction === "ai_fallback"
+      elseAction: candidate.elseAction === "reply" || candidate.elseAction === "next_question" || candidate.elseAction === "ai_fallback"
         ? candidate.elseAction
         : legacyFallback.toLowerCase().includes("ai") ? "ai_fallback" : "reply",
       elseReply: typeof candidate.elseReply === "string" ? candidate.elseReply : legacyFallback,
+      elseNextPlanId: typeof candidate.elseNextPlanId === "string" && candidate.elseNextPlanId.trim()
+        ? candidate.elseNextPlanId
+        : undefined,
       status: candidate.status as DailyDeliveryPlan["status"],
     }];
   });
@@ -2904,7 +2946,13 @@ function AdminProactiveMessages({
     setPlans((prev) => prev.map((plan) => plan.id === planId
       ? {
           ...plan,
-          branches: [...plan.branches, { id: uid(), kind: plan.branches.length === 0 ? "if" : "elseif", choice: "", reply: "" }],
+          branches: [...plan.branches, {
+            id: uid(),
+            kind: plan.branches.length === 0 ? "if" : "elseif",
+            choice: "",
+            action: "reply",
+            reply: "",
+          }],
         }
       : plan));
     setSaveState("idle");
@@ -2917,6 +2965,11 @@ function AdminProactiveMessages({
         .map((branch, index) => ({ ...branch, kind: index === 0 ? "if" as const : "elseif" as const }));
       return { ...plan, branches };
     }));
+    setSaveState("idle");
+  }
+
+  function setStartPlan(planId: string) {
+    setPlans((prev) => prev.map((plan) => ({ ...plan, isStart: plan.id === planId })));
     setSaveState("idle");
   }
 
@@ -2943,7 +2996,7 @@ function AdminProactiveMessages({
         <div>
           <h2 className="text-base font-semibold" style={{ color: "var(--foreground)" }}>Proactive Messages</h2>
           <p className="text-xs mt-1" style={{ color: "var(--muted-foreground)" }}>
-            ตั้ง Welcome message แล้วกำหนดคำตอบด้วย IF / ELSE IF / ELSE
+            เลือก Welcome message หลัก 1 ข้อ แล้วให้ทุก IF / ELSE IF / ELSE ตอบเป็นข้อความหรือไปยังคำถามอื่น
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -2956,8 +3009,8 @@ function AdminProactiveMessages({
               const day = JOURNEY_STAGES.find((s) => s.id === stage)?.day ?? 1;
               const id = uid();
               setPlans((prev) => [...prev, {
-                id, day, stageId: stage, name: "New proactive message", channel: "chat",
-                message: "", branches: [{ id: uid(), kind: "if", choice: "", reply: "" }],
+                id, day, stageId: stage, name: "New proactive message", channel: "chat", isStart: false,
+                message: "", branches: [{ id: uid(), kind: "if", choice: "", action: "reply", reply: "" }],
                 elseAction: "ai_fallback", elseReply: "", status: "draft",
               }]);
               setEditingId(id);
@@ -3022,6 +3075,11 @@ function AdminProactiveMessages({
                 <span className="text-[10px] px-2 py-0.5 rounded-full shrink-0" style={{ backgroundColor: "var(--muted)", color: "var(--muted-foreground)" }}>
                   IF + {Math.max(plan.branches.length - 1, 0)} ELSE IF
                 </span>
+                {plan.isStart && (
+                  <span className="text-[10px] px-2 py-0.5 rounded-full font-semibold shrink-0" style={{ backgroundColor: "rgba(196,30,30,0.08)", color: "var(--primary)" }}>
+                    WELCOME
+                  </span>
+                )}
                 <span className="text-xs flex-1 min-w-0">
                   <span className="block font-semibold truncate" style={{ color: "var(--foreground)" }}>{plan.name}</span>
                   <span className="block truncate mt-0.5" style={{ color: "var(--muted-foreground)" }}>{plan.message || "ยังไม่มีข้อความ"}</span>
@@ -3044,7 +3102,7 @@ function AdminProactiveMessages({
                 >
                   <div className="grid md:grid-cols-2 gap-4">
                     <div className="flex flex-col gap-1.5">
-                      <label className="text-xs font-medium" style={{ color: "var(--muted-foreground)" }}>Stage</label>
+                      <label className="text-xs font-medium" style={{ color: "var(--muted-foreground)" }}>Research stage (หลังบ้านเท่านั้น)</label>
                       <select value={plan.stageId} onChange={(e) => {
                         const nextStage = e.target.value as JourneyStageId;
                         patch(plan.id, { stageId: nextStage, day: JOURNEY_STAGES.find((s) => s.id === nextStage)?.day ?? 1 });
@@ -3071,8 +3129,31 @@ function AdminProactiveMessages({
                     <input value={plan.name} onChange={(e) => patch(plan.id, { name: e.target.value })} className={inputCls} style={inputStyle} />
                   </div>
 
+                  <div className="flex items-center justify-between gap-3 rounded-lg border px-3 py-2.5" style={{ borderColor: "var(--border)", backgroundColor: "var(--card)" }}>
+                    <div>
+                      <p className="text-xs font-semibold" style={{ color: "var(--foreground)" }}>
+                        {plan.isStart ? "Welcome message หลัก" : "คำถามต่อเนื่อง"}
+                      </p>
+                      <p className="text-[10px] mt-0.5" style={{ color: "var(--muted-foreground)" }}>
+                        {plan.isStart ? "ผู้เล่นจะเห็นคำถามนี้เป็นข้อความแรก" : "จะแสดงเฉพาะเมื่อ IF / ELSE ลิงก์มาถึง"}
+                      </p>
+                    </div>
+                    {!plan.isStart && plan.channel === "chat" && (
+                      <button
+                        type="button"
+                        onClick={() => setStartPlan(plan.id)}
+                        className="h-8 px-3 rounded-lg text-xs font-semibold border"
+                        style={{ borderColor: "var(--primary)", color: "var(--primary)", backgroundColor: "transparent" }}
+                      >
+                        ตั้งเป็น Welcome
+                      </button>
+                    )}
+                  </div>
+
                   <div className="flex flex-col gap-1.5">
-                    <label className="text-xs font-medium" style={{ color: "var(--muted-foreground)" }}>Welcome message</label>
+                    <label className="text-xs font-medium" style={{ color: "var(--muted-foreground)" }}>
+                      {plan.isStart ? "Welcome message" : "Question / Bot message"}
+                    </label>
                     <textarea
                       value={plan.message}
                       onChange={(e) => patch(plan.id, { message: e.target.value })}
@@ -3120,30 +3201,64 @@ function AdminProactiveMessages({
                             />
                           </label>
                           <label className="flex flex-col gap-1 text-[11px] font-medium" style={{ color: "var(--muted-foreground)" }}>
-                            ให้ Bot ตอบ
-                            <input
-                              value={branch.reply}
-                              onChange={(event) => patchBranch(plan.id, branch.id, { reply: event.target.value })}
-                              placeholder="ข้อความตอบกลับหรือคำถามถัดไป"
+                            จากนั้น
+                            <select
+                              value={branch.action}
+                              onChange={(event) => patchBranch(plan.id, branch.id, { action: event.target.value as ProactiveBranch["action"] })}
                               className={inputCls}
                               style={inputStyle}
-                            />
+                            >
+                              <option value="reply">ตอบเป็นข้อความ</option>
+                              <option value="next_question">ไปยังคำถามอื่น</option>
+                            </select>
                           </label>
                         </div>
-                        <label className="flex flex-col gap-1 text-[11px] font-medium" style={{ color: "var(--muted-foreground)" }}>
-                          ส่ง Content เพิ่มเติม (ไม่บังคับ)
-                          <select
-                            value={branch.contentId ?? ""}
-                            onChange={(event) => patchBranch(plan.id, branch.id, { contentId: event.target.value || undefined })}
-                            className={inputCls}
-                            style={inputStyle}
-                          >
-                            <option value="">— ไม่ส่ง content —</option>
-                            {KNOWLEDGE.map((knowledge) => (
-                              <option key={knowledge.topicId} value={knowledge.topicId}>{knowledge.topicId} · {knowledge.title}</option>
-                            ))}
-                          </select>
-                        </label>
+                        {branch.action === "next_question" ? (
+                          <label className="flex flex-col gap-1 text-[11px] font-medium" style={{ color: "var(--muted-foreground)" }}>
+                            ไปยังคำถาม
+                            <select
+                              value={branch.nextPlanId ?? ""}
+                              onChange={(event) => patchBranch(plan.id, branch.id, { nextPlanId: event.target.value || undefined })}
+                              className={inputCls}
+                              style={inputStyle}
+                            >
+                              <option value="">— เลือกคำถามถัดไป —</option>
+                              {plans.filter((target) => target.id !== plan.id && target.channel === "chat").map((target) => (
+                                <option key={target.id} value={target.id}>
+                                  {target.name} · {target.message || "ยังไม่มีข้อความ"}{target.status === "draft" ? " (Draft)" : ""}
+                                </option>
+                              ))}
+                            </select>
+                          </label>
+                        ) : (
+                          <>
+                            <label className="flex flex-col gap-1 text-[11px] font-medium" style={{ color: "var(--muted-foreground)" }}>
+                              ให้ Bot ตอบ
+                              <textarea
+                                value={branch.reply}
+                                onChange={(event) => patchBranch(plan.id, branch.id, { reply: event.target.value })}
+                                placeholder="ข้อความตอบกลับ"
+                                rows={2}
+                                className="px-3 py-2 rounded-md text-sm resize-none"
+                                style={{ ...inputStyle, lineHeight: "1.6" }}
+                              />
+                            </label>
+                            <label className="flex flex-col gap-1 text-[11px] font-medium" style={{ color: "var(--muted-foreground)" }}>
+                              ส่ง Content เพิ่มเติม (ไม่บังคับ)
+                              <select
+                                value={branch.contentId ?? ""}
+                                onChange={(event) => patchBranch(plan.id, branch.id, { contentId: event.target.value || undefined })}
+                                className={inputCls}
+                                style={inputStyle}
+                              >
+                                <option value="">— ไม่ส่ง content —</option>
+                                {KNOWLEDGE.map((knowledge) => (
+                                  <option key={knowledge.topicId} value={knowledge.topicId}>{knowledge.topicId} · {knowledge.title}</option>
+                                ))}
+                              </select>
+                            </label>
+                          </>
+                        )}
                       </div>
                     ))}
                   </div>
@@ -3159,6 +3274,7 @@ function AdminProactiveMessages({
                     >
                       <option value="ai_fallback">ใช้ AI fallback</option>
                       <option value="reply">ตอบด้วยข้อความที่กำหนด</option>
+                      <option value="next_question">ไปยังคำถามอื่น</option>
                     </select>
                     {plan.elseAction === "reply" ? (
                       <textarea
@@ -3169,6 +3285,20 @@ function AdminProactiveMessages({
                         className="px-3 py-2 rounded-md text-sm resize-none"
                         style={{ ...inputStyle, lineHeight: "1.6" }}
                       />
+                    ) : plan.elseAction === "next_question" ? (
+                      <select
+                        value={plan.elseNextPlanId ?? ""}
+                        onChange={(event) => patch(plan.id, { elseNextPlanId: event.target.value || undefined })}
+                        className={inputCls}
+                        style={inputStyle}
+                      >
+                        <option value="">— เลือกคำถามถัดไป —</option>
+                        {plans.filter((target) => target.id !== plan.id && target.channel === "chat").map((target) => (
+                          <option key={target.id} value={target.id}>
+                            {target.name} · {target.message || "ยังไม่มีข้อความ"}{target.status === "draft" ? " (Draft)" : ""}
+                          </option>
+                        ))}
+                      </select>
                     ) : (
                       <p className="text-xs" style={{ color: "var(--muted-foreground)" }}>
                         ระบบจะค้น Manual Content และฐานความรู้ก่อน แล้วจึงเรียก AI-INsea
@@ -4040,7 +4170,7 @@ function AdminPreview({ deliveryPlans }: { deliveryPlans: DailyDeliveryPlan[] })
               <p className="mt-0.5 capitalize" style={{ color: "var(--foreground)" }}>{plan.channel}</p>
             </div>
             <div>
-              <p className="font-medium" style={{ color: "var(--muted-foreground)" }}>Welcome message</p>
+              <p className="font-medium" style={{ color: "var(--muted-foreground)" }}>{plan.isStart ? "Welcome message" : "Question / Bot message"}</p>
               <p className="mt-0.5 leading-relaxed" style={{ color: "var(--foreground)" }}>{plan.message}</p>
             </div>
             <div>
@@ -4048,11 +4178,17 @@ function AdminPreview({ deliveryPlans }: { deliveryPlans: DailyDeliveryPlan[] })
               <div className="mt-1 flex flex-col gap-1">
                 {plan.branches.map((branch, index) => (
                   <p key={branch.id} className="text-[10px] leading-relaxed" style={{ color: "var(--foreground)" }}>
-                    {index === 0 ? "IF" : "ELSE IF"} · {branch.choice || "ยังไม่มีตัวเลือก"}
+                    {index === 0 ? "IF" : "ELSE IF"} · {branch.choice || "ยังไม่มีตัวเลือก"} → {branch.action === "next_question"
+                      ? `คำถาม: ${deliveryPlans.find((target) => target.id === branch.nextPlanId)?.name ?? "ยังไม่ได้เลือก"}`
+                      : branch.reply || "ยังไม่มีข้อความ"}
                   </p>
                 ))}
                 <p className="text-[10px] leading-relaxed" style={{ color: "var(--foreground)" }}>
-                  ELSE · {plan.elseAction === "ai_fallback" ? "AI fallback" : plan.elseReply || "ยังไม่มีข้อความ"}
+                  ELSE · {plan.elseAction === "ai_fallback"
+                    ? "AI fallback"
+                    : plan.elseAction === "next_question"
+                      ? `คำถาม: ${deliveryPlans.find((target) => target.id === plan.elseNextPlanId)?.name ?? "ยังไม่ได้เลือก"}`
+                      : plan.elseReply || "ยังไม่มีข้อความ"}
                 </p>
               </div>
             </div>
