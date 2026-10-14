@@ -15,6 +15,41 @@ const ACTION_IDS = [
 type ActionId = (typeof ACTION_IDS)[number];
 type ContextMessage = { role: "user" | "assistant"; text: string };
 
+// Log only bounded identifiers and classifications. Never log the response body,
+// request headers, API key, user query, or conversation contents.
+function upstreamFailureDetails(response: Response, raw: string) {
+  const safeIdentifier = (value: unknown) =>
+    typeof value === "string" && /^[A-Za-z0-9_.:/-]{1,120}$/.test(value)
+      ? value
+      : undefined;
+  let errorCode: string | undefined;
+  try {
+    const payload = JSON.parse(raw);
+    errorCode = safeIdentifier(payload?.code ?? payload?.error?.code ?? payload?.error_code);
+  } catch { /* Gateways can return HTML instead of the API's JSON response. */ }
+  const text = raw.toLowerCase();
+  const reason = /cloudflare|cf-ray|cloudfront|request blocked|web application firewall/.test(text)
+    ? "gateway_block"
+    : /expired|invalid.{0,40}(key|token)|(key|token).{0,40}invalid/.test(text)
+      ? "credential_rejected"
+      : /quota|budget|credit|balance/.test(text)
+        ? "quota_or_budget"
+        : /not published|unpublished/.test(text)
+          ? "not_published"
+          : /permission|forbidden|access denied|not authorized|not allowed/.test(text)
+            ? "access_denied"
+            : "unclassified";
+  return {
+    upstreamStatus: response.status,
+    contentType: response.headers.get("content-type")?.split(";")[0],
+    server: safeIdentifier(response.headers.get("server")),
+    upstreamRequestId: safeIdentifier(response.headers.get("x-request-id") ?? response.headers.get("cf-ray")),
+    errorCode,
+    reason,
+    responseBytes: Buffer.byteLength(raw, "utf8"),
+  };
+}
+
 type InseaEvent = {
   answer?: unknown;
   content?: unknown;
@@ -135,7 +170,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (req.method === "GET") {
     return res.status(200).json({
       service: "FCO Rookie Coach AI fallback",
-      configured: Boolean(process.env.AI_INSEA_API_KEY),
+      configured: Boolean(process.env.AI_INSEA_API_KEY?.trim()),
     });
   }
 
@@ -150,7 +185,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     return res.status(413).json({ error: "Query is too long" });
   }
 
-  const apiKey = process.env.AI_INSEA_API_KEY;
+  const apiKey = process.env.AI_INSEA_API_KEY?.trim();
   if (!apiKey) {
     return res.status(503).json({
       error: "AI fallback is not configured",
@@ -199,6 +234,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     const raw = await upstream.text();
     if (!upstream.ok) {
+      console.error("ai_insea_upstream_failure", upstreamFailureDetails(upstream, raw));
       return res.status(502).json({
         error: "AI-INsea request failed",
         upstreamStatus: upstream.status,
