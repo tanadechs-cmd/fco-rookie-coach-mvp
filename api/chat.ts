@@ -1,6 +1,6 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
-import { normalizeAiResponse } from '../src/aiResponse.ts';
-import { takePilotSlot } from '../lib/pilotRateLimit.ts';
+import { normalizeAiResponse } from '../lib/aiResponse.js';
+import { takePilotSlot } from '../lib/pilotRateLimit.js';
 
 const DEFAULT_CHATFLOW_URL = "https://ai.insea.io/api/chatflows/24426/run";
 const MAX_QUERY_LENGTH = 2_000;
