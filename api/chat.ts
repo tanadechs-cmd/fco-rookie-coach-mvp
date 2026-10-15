@@ -1,18 +1,12 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
+import { normalizeAiResponse } from '../src/aiResponse.ts';
+import { takePilotSlot } from '../lib/pilotRateLimit.ts';
 
 const DEFAULT_CHATFLOW_URL = "https://ai.insea.io/api/chatflows/24426/run";
 const MAX_QUERY_LENGTH = 2_000;
 const MAX_CONTEXT_MESSAGES = 6;
 const MAX_CONTEXT_LENGTH = 3_000;
 const REQUEST_TIMEOUT_MS = 20_000;
-const ACTION_IDS = [
-  "education_hub",
-  "discord",
-  "customer_support",
-  "report_question",
-] as const;
-
-type ActionId = (typeof ACTION_IDS)[number];
 type ContextMessage = { role: "user" | "assistant"; text: string };
 
 // Log only bounded identifiers and classifications. Never log the response body,
@@ -124,29 +118,6 @@ function parseInseaResponse(raw: string, contentType: string) {
   return { answer: parts.join("").trim(), conversationId };
 }
 
-function parseStructuredAnswer(rawAnswer: string) {
-  const candidate = rawAnswer
-    .trim()
-    .replace(/^```(?:json)?\s*/i, "")
-    .replace(/\s*```$/, "")
-    .trim();
-
-  try {
-    const parsed = JSON.parse(candidate) as { answer?: unknown; actions?: unknown };
-    if (typeof parsed.answer !== "string" || !parsed.answer.trim()) {
-      return { answer: rawAnswer, actions: [] as ActionId[] };
-    }
-    const actions = Array.isArray(parsed.actions)
-      ? parsed.actions.filter(
-          (action): action is ActionId =>
-            typeof action === "string" && ACTION_IDS.includes(action as ActionId),
-        )
-      : [];
-    return { answer: parsed.answer.trim(), actions: [...new Set(actions)].slice(0, 2) };
-  } catch {
-    return { answer: rawAnswer, actions: [] as ActionId[] };
-  }
-}
 
 function readContext(value: unknown): ContextMessage[] {
   if (!Array.isArray(value)) return [];
@@ -177,6 +148,16 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (req.method !== "POST") {
     res.setHeader("Allow", "GET, POST");
     return res.status(405).json({ error: "Method not allowed" });
+  }
+
+  if (process.env.VERCEL) {
+    const origin = req.headers.origin;
+    if (req.headers['sec-fetch-site'] === 'cross-site' || (origin && origin !== `https://${req.headers.host}`)) return res.status(403).json({ error: 'Invalid origin' });
+    const ip = String(req.headers['x-vercel-forwarded-for'] || req.headers['x-forwarded-for'] || 'unknown').split(',')[0].trim();
+    if (!takePilotSlot(`ip:${ip}`, 10) || !takePilotSlot('all', 60)) {
+      res.setHeader('Retry-After', '60');
+      return res.status(429).json({ error: 'Too many requests. Please try again in a minute.' });
+    }
   }
 
   const query = typeof req.body?.query === "string" ? req.body.query.trim() : "";
@@ -249,7 +230,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       return res.status(502).json({ error: "AI-INsea returned an empty answer" });
     }
 
-    const structured = parseStructuredAnswer(parsed.answer);
+    const structured = normalizeAiResponse(parsed.answer);
+    if (!structured.answer) return res.status(502).json({ error: "AI-INsea returned an empty answer" });
 
     return res.status(200).json({
       answer: structured.answer,

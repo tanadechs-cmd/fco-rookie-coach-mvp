@@ -1,9 +1,17 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useContext } from "react";
+import { AccountGate, AccountContext, AdminAccess, LiveOverview, Rating, Nps, NpsSettings, request } from './Review';
+import { canRateMessage, isPromptText } from './answerFeedback';
+import { CoachMascot, COACH_MASCOT, LanguageSwitcher, PlayerLanguageProvider, usePlayerLanguage } from './PlayerUI';
+import { ENGLISH_KNOWLEDGE, FAQ_ENGLISH_BY_QUESTION } from './knowledgeEnglish';
+import { englishStatus, sourceSignature, selectAnswerLanguage, rankConfiguredAnswer, isMoneyQuestion, type AnswerLanguage, type BilingualAnswerConfig, type LocalizedAnswer } from './knowledgeRouting';
+import BilingualAnswerEditor from './BilingualAnswerEditor';
+import { PUBLIC_TRIAL, trialRequest } from './publicTrial';
+import { normalizeAiResponse } from './aiResponse';
+import { conversationCopy, withOpening } from './knowledgeConversation';
 import { MessageCircle, LogOut, Send, Globe, Play, BookOpen, GitBranch, Eye, Search, ExternalLink, Clock, LockKeyhole, Keyboard, Gamepad2, History, Bell, Trash2 } from "lucide-react";
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
-type Role = "player";
 type PlayerTab = "chat" | "notifications";
 type PlayerSegment = "new-under-month" | "returning-under-month" | "experienced";
 type ChipMode = "activation" | "competence" | "next-goal" | "post-content";
@@ -40,6 +48,8 @@ interface KnowledgeItem {
 }
 
 interface Message {
+  language?: AnswerLanguage;
+  feedbackEligible?: boolean;
   id: string;
   role: "user" | "assistant" | "separator";
   text: string;
@@ -52,21 +62,15 @@ interface Message {
   actions?: ResponseActionId[];
 }
 
-interface ChatAnswerConfig {
-  id: string;
-  title: string;
-  text: string;
-  keywords: string[];
-  keyboardSteps: string[];
-  xboxSteps: string[];
-  playstationSteps: string[];
+interface ChatAnswerConfig extends BilingualAnswerConfig {
   source: string;
-  isManual?: boolean;
 }
 
 interface FaqConfigItem {
   id: string;
   question: string;
+  questionEn?: string;
+  questionEnSource?: string;
   stageId: JourneyStageId;
   topicId: string;
   secondaryTopicId?: string;
@@ -116,6 +120,7 @@ interface DailyDeliveryPlan {
   name: string;
   channel: DeliveryChannel;
   isStart: boolean;
+  dailyEntry?: boolean;
   message: string;
   branches: ProactiveBranch[];
   elseAction: "reply" | "next_question" | "ai_fallback";
@@ -129,7 +134,7 @@ interface DailyDeliveryPlan {
   status: "active" | "draft";
 }
 
-type AdminTab = "overview" | "proactive-messages" | "notifications" | "faq-content" | "unanswered" | "preview" | "history";
+type AdminTab = "overview" | "proactive-messages" | "notifications" | "faq-content" | "unanswered" | "preview" | "history" | "access";
 
 interface ReportedQuestion {
   id: string;
@@ -894,50 +899,9 @@ function findKnowledge(id: string): KnowledgeItem | undefined {
   return KNOWLEDGE.find((k) => k.id === id);
 }
 
-// Short pure-ASCII keywords (≤3 chars: BP, CP, SC, SP, TC, FP) require a
-// complete token match so "pass" or "special" don't accidentally match "sp".
-function kwMatches(kw: string, q: string): boolean {
-  const lower = kw.toLowerCase();
-  if (lower.length <= 3 && /^[a-z0-9]+$/.test(lower)) {
-    return new RegExp(`(?:^|[^a-z0-9])${lower}(?=$|[^a-z0-9])`, "i").test(q);
-  }
-  return q.includes(lower);
-}
-
-function matchKnowledge(text: string): KnowledgeItem | undefined {
-  const q = text.toLowerCase();
-  type Candidate = { item: KnowledgeItem; exact: number; count: number; maxLen: number };
-  let best: Candidate | null = null;
-
-  KNOWLEDGE.forEach((item) => {
-    const exact =
-      q.includes(item.title.toLowerCase()) || kwMatches(item.id, q) ? 1 : 0;
-    const matched = item.keywords.filter((kw) => kwMatches(kw, q));
-    if (!exact && matched.length === 0) return;
-    const count = matched.length;
-    const maxLen = count > 0 ? Math.max(...matched.map((kw) => kw.length)) : 0;
-    if (
-      !best ||
-      exact > best.exact ||
-      (exact === best.exact && count > best.count) ||
-      (exact === best.exact && count === best.count && maxLen > best.maxLen)
-    ) {
-      best = { item, exact, count, maxLen };
-    }
-  });
-
-  return best ? (best as Candidate).item : undefined;
-}
-
-function isMoneyQuestion(text: string): boolean {
-  const q = text.toLowerCase().replace(/\s+/g, "");
-  return (
-    q.includes("หาเงิน") ||
-    q.includes("หาbp") ||
-    q.includes("เงินมาจากไหน") ||
-    q.includes("ได้เงินยังไง") ||
-    q.includes("เงินไม่พอ")
-  );
+function matchKnowledge(text: string, answers: ChatAnswerConfig[]): KnowledgeItem | undefined {
+  const match = rankConfiguredAnswer(text, answers.filter(answer => !answer.isManual));
+  return match ? findKnowledge(match.id) : undefined;
 }
 
 function formatDuration(sec: number): string {
@@ -1037,7 +1001,7 @@ const FALLBACK: CannedAnswer = {
 function createDefaultChatAnswers(): ChatAnswerConfig[] {
   return KNOWLEDGE.map((item) => {
     const direct = CANNED[item.id];
-    return {
+    const answer: ChatAnswerConfig = {
       id: item.id,
       title: item.title,
       text: direct?.text ?? item.shortSummary,
@@ -1047,7 +1011,29 @@ function createDefaultChatAnswers(): ChatAnswerConfig[] {
       playstationSteps: direct?.playstationSteps ?? [],
       source: direct?.source ?? item.source,
     };
+    const english = ENGLISH_KNOWLEDGE[item.id];
+    if (english) answer.en = {
+      title: english.title, text: english.text, keywords: english.keywords,
+      keyboardSteps: english.keyboardSteps, xboxSteps: english.xboxSteps, playstationSteps: english.playstationSteps,
+      sourceSignature: sourceSignature({ ...answer, text: english.sourceText, keyboardSteps: english.sourceKeyboardSteps, xboxSteps: english.sourceXboxSteps, playstationSteps: english.sourcePlaystationSteps }),
+    };
+    return answer;
   });
+}
+
+function normalizeEnglish(raw: unknown): LocalizedAnswer | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const value = raw as Record<string, unknown>;
+  const list = (field: unknown) => Array.isArray(field) ? field.filter((v): v is string => typeof v === 'string') : [];
+  return {
+    title: typeof value.title === 'string' ? value.title : '',
+    text: typeof value.text === 'string' ? value.text : '',
+    opening: typeof value.opening === 'string' ? value.opening : undefined,
+    clipIntro: typeof value.clipIntro === 'string' ? value.clipIntro : undefined,
+    keywords: list(value.keywords), keyboardSteps: list(value.keyboardSteps),
+    xboxSteps: list(value.xboxSteps), playstationSteps: list(value.playstationSteps),
+    sourceSignature: typeof value.sourceSignature === 'string' ? value.sourceSignature : undefined,
+  };
 }
 
 function mergeChatAnswers(raw: unknown): ChatAnswerConfig[] {
@@ -1064,11 +1050,14 @@ function mergeChatAnswers(raw: unknown): ChatAnswerConfig[] {
       ...fallback,
       title: typeof candidate.title === "string" ? candidate.title : fallback.title,
       text: candidate.text,
+      opening: typeof candidate.opening === 'string' ? candidate.opening : undefined,
+      clipIntro: typeof candidate.clipIntro === 'string' ? candidate.clipIntro : undefined,
       keywords: stringList(candidate.keywords, fallback.keywords),
       keyboardSteps: stringList(candidate.keyboardSteps, fallback.keyboardSteps),
       xboxSteps: stringList(candidate.xboxSteps, fallback.xboxSteps),
       playstationSteps: stringList(candidate.playstationSteps, fallback.playstationSteps),
       source: typeof candidate.source === "string" ? candidate.source : fallback.source,
+      en: 'en' in candidate ? normalizeEnglish(candidate.en) : fallback.en,
     };
   });
 
@@ -1088,12 +1077,15 @@ function mergeChatAnswers(raw: unknown): ChatAnswerConfig[] {
       id: candidate.id,
       title: candidate.title,
       text: candidate.text,
+      opening: typeof candidate.opening === 'string' ? candidate.opening : undefined,
+      clipIntro: typeof candidate.clipIntro === 'string' ? candidate.clipIntro : undefined,
       keywords: stringList(candidate.keywords),
       keyboardSteps: stringList(candidate.keyboardSteps),
       xboxSteps: stringList(candidate.xboxSteps),
       playstationSteps: stringList(candidate.playstationSteps),
       source: typeof candidate.source === "string" ? candidate.source : "Manual content",
       isManual: true,
+      en: normalizeEnglish(candidate.en),
     }];
   });
 
@@ -1101,27 +1093,7 @@ function mergeChatAnswers(raw: unknown): ChatAnswerConfig[] {
 }
 
 function matchManualAnswer(text: string, answerConfigs: ChatAnswerConfig[]): ChatAnswerConfig | undefined {
-  const q = text.toLowerCase();
-  type Candidate = { answer: ChatAnswerConfig; exact: number; count: number; maxLen: number };
-  let best: Candidate | null = null;
-
-  answerConfigs.filter((answer) => answer.isManual).forEach((answer) => {
-    const exact = answer.title.trim() && q.includes(answer.title.trim().toLowerCase()) ? 1 : 0;
-    const matched = answer.keywords.filter((keyword) => keyword.trim() && kwMatches(keyword.trim(), q));
-    if (!exact && matched.length === 0) return;
-    const count = matched.length;
-    const maxLen = count > 0 ? Math.max(...matched.map((keyword) => keyword.length)) : 0;
-    if (
-      !best ||
-      exact > best.exact ||
-      (exact === best.exact && count > best.count) ||
-      (exact === best.exact && count === best.count && maxLen > best.maxLen)
-    ) {
-      best = { answer, exact, count, maxLen };
-    }
-  });
-
-  return best ? (best as Candidate).answer : undefined;
+  return rankConfiguredAnswer(text, answerConfigs.filter(answer => answer.isManual)) as ChatAnswerConfig | undefined;
 }
 
 function loadChatAnswers(): ChatAnswerConfig[] {
@@ -1169,8 +1141,21 @@ function getCannedAnswer(
   knowledge: KnowledgeItem | undefined,
   controlScheme: ControlScheme,
   answerConfigs: ChatAnswerConfig[],
+  language: AnswerLanguage = 'th',
+  includeOpening = true,
 ): { text: string; steps?: string[]; source?: string } {
   const configured = answerConfigs.find((answer) => answer.id === cannedKey);
+  const copy = conversationCopy(configured, language, cannedKey);
+  if (language === 'en') {
+    const english = configured && englishStatus(configured) === 'current' ? configured.en : undefined;
+    const englishSteps = english?.[controlScheme === 'keyboard' ? 'keyboardSteps' : controlScheme === 'xbox' ? 'xboxSteps' : 'playstationSteps'];
+    return {
+      text: withOpening(adaptButtonLabels(english?.text || 'The English version of this guide is being updated. You can check the original learning resource or tell me which part you need help with.', controlScheme), copy.opening, includeOpening)
+        + (knowledge?.timeSensitive ? '\n\nTime-sensitive information — check the latest version before using it.' : ''),
+      steps: englishSteps?.some(step => step.trim()) ? englishSteps.filter(step => step.trim()).map(step => adaptButtonLabels(step, controlScheme)) : undefined,
+      source: configured?.source ?? knowledge?.source,
+    };
+  }
   const direct = CANNED[cannedKey];
   const base: CannedAnswer = direct
     ? direct
@@ -1188,9 +1173,9 @@ function getCannedAnswer(
       : controlScheme === "xbox"
         ? base.xboxSteps
         : base.playstationSteps;
-  const safeSteps = steps ?? [];
+  const safeSteps = (steps ?? []).filter(step => step.trim());
   const answer = {
-    text: adaptButtonLabels(configured?.text ?? base.text, controlScheme),
+    text: withOpening(adaptButtonLabels(configured?.text ?? base.text, controlScheme), copy.opening, includeOpening),
     steps: safeSteps.length > 0 ? safeSteps.map((step) => adaptButtonLabels(step, controlScheme)) : undefined,
     source: configured?.source ?? base.source,
   };
@@ -1205,8 +1190,7 @@ function getCannedAnswer(
 
 // ── Player journey configuration ───────────────────────────────────────────────
 
-const MASCOT =
-  "https://images.unsplash.com/photo-1740252117044-2af197eea287?w=120&h=120&fit=crop&auto=format";
+const MASCOT = COACH_MASCOT;
 
 const EDUCATION_HUB_URL = "https://educationhub.fconline.garena.in.th/";
 const DISCORD_URL = "https://discord.gg/gv4H2ty9Z";
@@ -1252,7 +1236,6 @@ const JOURNEY_STAGES: JourneyStageDefinition[] = [
   },
 ];
 
-const FALLBACK_RELATED_IDS = ["dribbling", "shooting", "defending", "qss", "controller"];
 
 let _uidSeq = 0;
 function uid() {
@@ -1264,24 +1247,41 @@ function uid() {
 
 // ── KnowledgeCard ──────────────────────────────────────────────────────────────
 
-function KnowledgeCard({ item }: { item: KnowledgeItem }) {
+function KnowledgeCard({ item, answer, language: messageLanguage }: { item: KnowledgeItem; answer?: ChatAnswerConfig; language?: AnswerLanguage }) {
+  const { language: uiLanguage } = usePlayerLanguage();
+  const cardLanguage = messageLanguage ?? uiLanguage;
+  const t = (thai: string, english: string) => cardLanguage === 'en' ? english : thai;
+  const english = answer ? (englishStatus(answer) === 'current' ? answer.en : undefined) : ENGLISH_KNOWLEDGE[item.id];
+  const title = cardLanguage === 'en' ? english?.title || 'FC Online learning guide' : answer?.title || item.title;
+  const summary = cardLanguage === 'en' ? english?.text || 'The English summary is being updated.' : answer?.text || item.shortSummary;
+  const [playing, setPlaying] = useState(false);
+  let videoId = '';
+  try { const url = new URL(item.youtubeUrl); videoId = url.hostname === 'youtu.be' ? url.pathname.slice(1) : url.searchParams.get('v') || ''; } catch { /* External content stays a link. */ }
+  const canEmbed = /^[a-zA-Z0-9_-]{11}$/.test(videoId);
+  const thumbnail = item.thumbnailUrl || (canEmbed ? `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg` : undefined);
+  function play(event: React.MouseEvent) {
+    if (!canEmbed) return;
+    event.preventDefault(); event.stopPropagation(); setPlaying(true);
+    void request('/api/events', { type: 'content_open', text: item.id }).catch(() => {});
+  }
   return (
     <div
       className="rounded-lg overflow-hidden"
       style={{ border: "1px solid var(--border)" }}
     >
-      {item.thumbnailUrl ? (
+      {playing && canEmbed ? <div className="aspect-video"><iframe className="w-full h-full" title={title} src={`https://www.youtube-nocookie.com/embed/${videoId}?autoplay=1`} allow="autoplay; encrypted-media; picture-in-picture" allowFullScreen /></div> : thumbnail ? (
         <a
           href={item.youtubeUrl}
+          onClick={play}
           target="_blank"
           rel="noopener noreferrer"
           className="block relative"
           style={{ aspectRatio: "16/9", backgroundColor: "var(--muted)", display: "block" }}
-          aria-label={`ดูวิดีโอ: ${item.title}`}
+          aria-label={`${t('ดูวิดีโอ', 'Watch video')}: ${title}`}
         >
           <img
-            src={item.thumbnailUrl}
-            alt={item.title}
+            src={thumbnail}
+            alt={title}
             className="w-full h-full object-cover"
             style={{ display: "block" }}
           />
@@ -1298,22 +1298,23 @@ function KnowledgeCard({ item }: { item: KnowledgeItem }) {
 
       <div className="px-3 py-2.5 flex flex-col gap-1">
         <p className="text-sm font-medium leading-snug" style={{ color: "var(--foreground)" }}>
-          {item.title}
+          {title}
         </p>
         {item.thumbnailUrl ? (
           <p className="text-xs" style={{ color: "var(--muted-foreground)" }}>
-            {item.shortSummary}
+            {summary}
           </p>
         ) : (
           <p className="text-xs" style={{ color: "var(--muted-foreground)" }}>
-            {formatDuration(item.durationSec)}
+            {cardLanguage === 'en' ? `${item.durationSec} sec` : formatDuration(item.durationSec)}
           </p>
         )}
         {item.timeSensitive && (
           <p className="text-xs mt-0.5" style={{ color: "var(--muted-foreground)" }}>
-            ข้อมูลตามช่วงเวลา • ตรวจสอบเวอร์ชันล่าสุดก่อนใช้งาน
+            {t('ข้อมูลตามช่วงเวลา • ตรวจสอบเวอร์ชันล่าสุดก่อนใช้งาน', 'Time-sensitive information — check the latest version.')}
           </p>
         )}
+        <p className="text-xs" style={{ color: 'var(--muted-foreground)' }}>{t('วิดีโอภาษาไทย', 'Thai-language video')}</p>
         <div className="flex items-center justify-between mt-0.5">
           <p className="text-xs" style={{ color: "var(--muted-foreground)" }}>
             {item.source}
@@ -1321,12 +1322,13 @@ function KnowledgeCard({ item }: { item: KnowledgeItem }) {
           </p>
           <a
             href={item.youtubeUrl}
+            onClick={playing ? undefined : play}
             target="_blank"
             rel="noopener noreferrer"
             className="text-xs font-medium transition-opacity hover:opacity-70"
             style={{ color: "var(--primary)" }}
           >
-            ดูวิดีโอ
+            {playing ? t('เปิด YouTube', 'Open YouTube') : t('ดูวิดีโอ', 'Watch video')}
           </a>
         </div>
       </div>
@@ -1341,12 +1343,17 @@ function Composer({
   setInput,
   onSend,
   textareaRef,
+  large = false,
+  disabled = false,
 }: {
   input: string;
   setInput: (v: string) => void;
   onSend: () => void;
   textareaRef?: React.RefObject<HTMLTextAreaElement | null>;
+  large?: boolean;
+  disabled?: boolean;
 }) {
+  const { t } = usePlayerLanguage();
   function handleChange(e: React.ChangeEvent<HTMLTextAreaElement>) {
     setInput(e.target.value);
     const ta = e.currentTarget;
@@ -1355,7 +1362,7 @@ function Composer({
   }
 
   function handleKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
-    if (e.key === "Enter" && !e.shiftKey) {
+    if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing && !disabled) {
       e.preventDefault();
       onSend();
     }
@@ -1363,7 +1370,7 @@ function Composer({
 
   return (
     <div
-      className="rounded-2xl overflow-hidden"
+      className={`coach-composer rounded-2xl overflow-hidden ${large ? 'coach-composer--hero' : ''}`}
       style={{
         backgroundColor: "var(--card)",
         border: "1px solid var(--border)",
@@ -1376,15 +1383,16 @@ function Composer({
           value={input}
           onChange={handleChange}
           onKeyDown={handleKeyDown}
-          placeholder="ติดปัญหาอะไร ถามผมได้เลยครับ"
-          rows={1}
+          placeholder={t('ติดปัญหาอะไร ถามผมได้เลยครับ', 'Ask me anything about FC Online…')}
+          aria-label={t('ข้อความถึงโค้ช', 'Message your coach')}
+          rows={large ? 3 : 1}
           className="flex-1 resize-none text-sm bg-transparent py-1"
           style={{ color: "var(--foreground)", outline: "none", maxHeight: "120px", lineHeight: "1.6" }}
         />
         <button
           onClick={onSend}
-          disabled={!input.trim()}
-          aria-label="ส่งข้อความ"
+          disabled={!input.trim() || disabled}
+          aria-label={t('ส่งข้อความ', 'Send message')}
           className="w-9 h-9 rounded-full flex items-center justify-center shrink-0 transition-opacity disabled:opacity-30 hover:opacity-80"
           style={{ backgroundColor: "var(--primary)", color: "var(--primary-foreground)" }}
         >
@@ -1397,109 +1405,41 @@ function Composer({
 
 // ── LoginScreen ────────────────────────────────────────────────────────────────
 
-function LoginScreen({ onLogin }: { onLogin: () => void }) {
-  const [loading, setLoading] = useState(false);
 
-  function simulate() {
-    setLoading(true);
-    setTimeout(() => { setLoading(false); onLogin(); }, 700);
-  }
-
-  return (
-    <div
-      className="min-h-screen flex items-center justify-center p-6"
-      style={{ backgroundColor: "var(--background)" }}
-    >
-      <div className="w-full max-w-xs flex flex-col items-center gap-7">
-        <div
-          className="w-20 h-20 rounded-full overflow-hidden shrink-0"
-          style={{ backgroundColor: "var(--muted)" }}
-        >
-          <img
-            src={MASCOT}
-            alt="FCO Rookie Coach mascot"
-            className="w-full h-full object-cover"
-            onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = "none"; }}
-          />
-        </div>
-
-        <div className="text-center space-y-1">
-          <p
-            className="text-xs font-semibold tracking-widest uppercase"
-            style={{ color: "var(--primary)" }}
-          >
-            FCO Rookie Coach
-          </p>
-          <h1 className="text-2xl font-bold leading-snug" style={{ color: "var(--foreground)" }}>
-            เริ่มเล่นให้มั่นใจขึ้น
-          </h1>
-        </div>
-
-        <div className="w-full flex flex-col gap-3">
-          <button
-            onClick={simulate}
-            className="w-full h-11 rounded-lg flex items-center justify-center gap-2 text-sm font-medium border transition-colors"
-            style={{ borderColor: "var(--border)", color: "var(--foreground)", backgroundColor: "transparent" }}
-            onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = "var(--muted)")}
-            onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = "transparent")}
-          >
-            <Globe size={16} aria-hidden />
-            เข้าสู่ระบบด้วย Google
-          </button>
-
-          <button
-            onClick={simulate}
-            disabled={loading}
-            className="w-full h-11 rounded-lg flex items-center justify-center text-sm font-semibold transition-opacity disabled:opacity-60"
-            style={{ backgroundColor: "var(--primary)", color: "var(--primary-foreground)" }}
-          >
-            {loading ? "กำลังเข้าสู่ระบบ..." : "ทดลองใช้งาน"}
-          </button>
-
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function PlayerSegmentScreen({ onSelect }: { onSelect: (segment: PlayerSegment) => void }) {
+function PlayerSegmentScreen({ onSelect, onSignIn, busy = false, status = '' }: { onSelect: (segment: PlayerSegment) => void; onSignIn?: () => void; busy?: boolean; status?: string }) {
+  const { t } = usePlayerLanguage();
   const options: { id: PlayerSegment; title: string; description: string }[] = [
     {
       id: "new-under-month",
-      title: "เพิ่งเริ่มเล่น",
-      description: "เล่น FC Online มาไม่ถึง 1 เดือน",
+      title: t('เพิ่งเริ่มเล่น', 'Just starting'),
+      description: t('เล่น FC Online มาไม่ถึง 1 เดือน', 'Playing FC Online for less than a month'),
     },
     {
       id: "returning-under-month",
-      title: "เพิ่งกลับมาเล่น",
-      description: "กลับมาเล่นอีกครั้งไม่ถึง 1 เดือน",
+      title: t('เพิ่งกลับมาเล่น', 'Coming back'),
+      description: t('กลับมาเล่นอีกครั้งไม่ถึง 1 เดือน', 'Returned to FC Online within the past month'),
     },
     {
       id: "experienced",
-      title: "เล่นอยู่แล้ว",
-      description: "เล่นเกิน 1 เดือนและเข้าใจระบบหลักแล้ว",
+      title: t('เล่นอยู่แล้ว', 'Already playing'),
+      description: t('เล่นเกิน 1 เดือนและเข้าใจระบบหลักแล้ว', 'Playing for over a month and know the basics'),
     },
   ];
 
   return (
-    <div className="min-h-screen flex items-center justify-center p-6" style={{ backgroundColor: "var(--background)" }}>
-      <div className="w-full max-w-xl">
-        <div className="flex items-center gap-3 mb-7">
-          <div className="w-12 h-12 rounded-full overflow-hidden shrink-0" style={{ backgroundColor: "var(--muted)" }}>
-            <img src={MASCOT} alt="FCO Rookie Coach mascot" className="w-full h-full object-cover" />
-          </div>
-          <div>
-            <p className="text-[10px] font-semibold tracking-widest uppercase" style={{ color: "var(--primary)" }}>FCO Rookie Coach</p>
-            <h1 className="text-xl font-bold mt-0.5" style={{ color: "var(--foreground)" }}>ตอนนี้คุณอยู่ช่วงไหนของการเล่น?</h1>
-          </div>
-        </div>
+    <div className="rookie-landing" style={{ backgroundColor: "var(--background)" }}>
+      <header className="landing-header"><span className="rookie-wordmark">FCO <span>Rookie Coach</span></span><LanguageSwitcher /></header>
+      <main className="landing-content">
+        <CoachMascot className="landing-mascot" />
+        <h1>{t('ตอนนี้คุณอยู่ช่วงไหนของการเล่น?', 'Where are you in your FC Online journey?')}</h1>
 
         <div className="grid gap-3">
           {options.map((option) => (
             <button
               key={option.id}
               onClick={() => onSelect(option.id)}
-              className="w-full rounded-xl border px-5 py-4 text-left flex items-center justify-between gap-4 transition-colors"
+              disabled={busy}
+              className="segment-option w-full rounded-xl border px-5 py-4 text-left flex items-center justify-between gap-4 transition-colors disabled:opacity-50"
               style={{ borderColor: "var(--border)", backgroundColor: "var(--card)" }}
               onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = "var(--muted)")}
               onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = "var(--card)")}
@@ -1514,16 +1454,21 @@ function PlayerSegmentScreen({ onSelect }: { onSelect: (segment: PlayerSegment) 
         </div>
 
         <p className="text-xs mt-4 text-center" style={{ color: "var(--muted-foreground)" }}>
-          เราจะใช้คำตอบนี้เพื่อเลือกคำแนะนำที่เหมาะกับคุณ
+          {busy ? t('กำลังเตรียมโค้ชให้คุณ…', 'Getting your coach ready…') : t('เลือกคำแนะนำที่เหมาะกับคุณ', 'A little guidance, tailored to you')}
         </p>
-      </div>
+        {status && <p role="alert" className="text-sm text-red-700 mt-3 text-center">{status}</p>}
+        {onSignIn && <button className="landing-signin disabled:opacity-40 disabled:cursor-not-allowed" disabled={busy || PUBLIC_TRIAL} onClick={onSignIn}>{PUBLIC_TRIAL ? t('เข้าสู่ระบบ · ยังไม่เปิดใช้งาน', 'Sign in · Coming soon') : t('มีบัญชีทดสอบแล้ว? เข้าสู่ระบบ', 'Already a tester? Sign in')}</button>}
+        {PUBLIC_TRIAL && <p className="text-xs text-center mt-2 text-stone-500">{t('ทดลองแบบไม่ล็อกอิน · ประวัติเก็บในเบราว์เซอร์นี้เท่านั้น', 'Guest trial · History stays in this browser only')}</p>}
+      </main>
     </div>
   );
 }
 
 function ExperiencedPlayerScreen({ onBack }: { onBack: () => void }) {
+  const { t } = usePlayerLanguage();
   return (
-    <div className="min-h-screen flex items-center justify-center p-6" style={{ backgroundColor: "var(--background)" }}>
+    <div className="min-h-screen flex items-center justify-center p-6 relative" style={{ backgroundColor: "var(--background)" }}>
+      <div className="absolute right-5 top-5"><LanguageSwitcher /></div>
       <div className="w-full max-w-lg">
         <div className="flex items-center gap-3 mb-7">
           <div className="w-12 h-12 rounded-full overflow-hidden shrink-0" style={{ backgroundColor: "var(--muted)" }}>
@@ -1531,7 +1476,7 @@ function ExperiencedPlayerScreen({ onBack }: { onBack: () => void }) {
           </div>
           <div>
             <p className="text-[10px] font-semibold tracking-widest uppercase" style={{ color: "var(--primary)" }}>FCO Rookie Coach</p>
-            <h1 className="text-xl font-bold mt-0.5" style={{ color: "var(--foreground)" }}>เลือกพื้นที่ที่เหมาะกับคุณ</h1>
+            <h1 className="text-xl font-bold mt-0.5" style={{ color: "var(--foreground)" }}>{t('เลือกพื้นที่ที่เหมาะกับคุณ', 'Find your next advantage')}</h1>
           </div>
         </div>
 
@@ -1548,7 +1493,7 @@ function ExperiencedPlayerScreen({ onBack }: { onBack: () => void }) {
             </span>
             <span className="flex-1">
               <span className="block text-sm font-semibold">Educational Hub</span>
-              <span className="block text-xs mt-1" style={{ color: "var(--muted-foreground)" }}>ดูคลังวิดีโอ เทคนิค และข้อมูลเกมทั้งหมด</span>
+              <span className="block text-xs mt-1" style={{ color: "var(--muted-foreground)" }}>{t('ดูคลังวิดีโอ เทคนิค และข้อมูลเกมทั้งหมด', 'Explore videos, tips and game guides')}</span>
             </span>
             <ExternalLink size={15} style={{ color: "var(--muted-foreground)" }} aria-hidden />
           </a>
@@ -1559,8 +1504,8 @@ function ExperiencedPlayerScreen({ onBack }: { onBack: () => void }) {
                 <MessageCircle size={18} aria-hidden />
               </span>
               <div className="flex-1">
-                <p className="text-sm font-semibold" style={{ color: "var(--foreground)" }}>เข้า Discord FC Online แล้วหรือยัง?</p>
-                <p className="text-xs mt-1 leading-relaxed" style={{ color: "var(--muted-foreground)" }}>ถามผู้เล่นคนอื่น หาเพื่อน และติดตามกิจกรรมจากชุมชน</p>
+                <p className="text-sm font-semibold" style={{ color: "var(--foreground)" }}>{t('เข้า Discord FC Online แล้วหรือยัง?', 'Have you joined FC Online Discord?')}</p>
+                <p className="text-xs mt-1 leading-relaxed" style={{ color: "var(--muted-foreground)" }}>{t('ถามผู้เล่นคนอื่น หาเพื่อน และติดตามกิจกรรมจากชุมชน', 'Ask other players, find teammates and follow community events')}</p>
                 <a
                   href={DISCORD_URL}
                   target="_blank"
@@ -1568,7 +1513,7 @@ function ExperiencedPlayerScreen({ onBack }: { onBack: () => void }) {
                   className="mt-3 h-9 px-4 rounded-lg inline-flex items-center gap-2 text-xs font-semibold"
                   style={{ backgroundColor: "var(--primary)", color: "var(--primary-foreground)" }}
                 >
-                  เข้า Discord FC Online
+                  {t('เข้า Discord FC Online', 'Join FC Online Discord')}
                   <ExternalLink size={13} aria-hidden />
                 </a>
               </div>
@@ -1577,7 +1522,7 @@ function ExperiencedPlayerScreen({ onBack }: { onBack: () => void }) {
         </div>
 
         <button onClick={onBack} className="mt-5 text-xs w-full text-center hover:underline" style={{ color: "var(--muted-foreground)" }}>
-          กลับไปเลือกประเภทผู้เล่น
+          {t('กลับไปเลือกประเภทผู้เล่น', 'Back to player selection')}
         </button>
       </div>
     </div>
@@ -1691,45 +1636,79 @@ function CoachScreen({
   deliveryPlans: DailyDeliveryPlan[];
 }) {
   const [activeTab, setActiveTab] = useState<PlayerTab>("chat");
+  const { language, t } = usePlayerLanguage();
+  const account = useContext(AccountContext);
+  const saved = account?.state || {};
+  const [saveError, setSaveError] = useState('');
+  const [npsOpen, setNpsOpen] = useState(false);
+  const [npsDone, setNpsDone] = useState(false);
+  const [npsRead, setNpsRead] = useState(Boolean(saved.npsRead));
+  const [lastProactiveDay, setLastProactiveDay] = useState<number>(saved.lastProactiveDay || 0);
+  const [toastDismissed, setToastDismissed] = useState(false);
+  const [localConversationId] = useState(() => saved.localConversationId || uid());
   const [notifications, setNotifications] = useState<AppNotification[]>(() => buildPlayerNotifications(deliveryPlans));
-  const [expandedNotifId, setExpandedNotifId] = useState<string | null>(null);
 
-  const [messages, setMessages] = useState<Message[]>([]);
+  const [messages, setMessages] = useState<Message[]>(saved.messages || []);
+  const isFirstChat = !messages.some(message => message.role === 'user');
   const [isTyping, setIsTyping] = useState(false);
-  const [chipMode, setChipMode] = useState<ChipMode | null>("activation");
-  const [activeProactivePlanId, setActiveProactivePlanId] = useState<string | null>(null);
-  const [journeyStage, setJourneyStage] = useState<JourneyStageId>("activation");
-  const [shownTopicIds, setShownTopicIds] = useState<Set<string>>(new Set<string>());
+  const [chipMode, setChipMode] = useState<ChipMode | null>(saved.chipMode === undefined ? "activation" : saved.chipMode);
+  const [activeProactivePlanId, setActiveProactivePlanId] = useState<string | null>(saved.activeProactivePlanId || null);
+  const [journeyStage, setJourneyStage] = useState<JourneyStageId>(saved.journeyStage || "activation");
+  const [shownTopicIds, setShownTopicIds] = useState<Set<string>>(new Set<string>(saved.shownTopicIds || []));
   const [input, setInput] = useState("");
   const [conversationId, setConversationId] = useState<string | undefined>();
   const [controlScheme, setControlScheme] = useState<ControlScheme>(() => {
+    if (account?.state.controlScheme) return account.state.controlScheme;
     const saved = window.localStorage.getItem(CONTROL_SCHEME_STORAGE_KEY);
     if (saved === "keyboard" || saved === "playstation" || saved === "xbox") return saved;
     return "xbox";
   });
   const composerRef = useRef<HTMLTextAreaElement>(null);
-  const endRef = useRef<HTMLDivElement>(null);
+  const chatScrollRef = useRef<HTMLDivElement>(null);
+  const previousMessageCount = useRef(0);
 
-  const [reportedQueries, setReportedQueries] = useState<Set<string>>(new Set<string>());
+  const [reportedQueries, setReportedQueries] = useState<Set<string>>(new Set<string>(saved.reportedQueries || []));
 
-  const hasUnread = notifications.some((n) => !n.read);
+  const npsEligible = !PUBLIC_TRIAL && !npsDone && !account?.npsCompleted && (account?.questionCount ?? 0) >= (account?.npsAfterMessages ?? 2);
+  const hasUnread = notifications.some((n) => !n.read) || (npsEligible && !npsRead);
   const activeChatPlans = deliveryPlans.filter((plan) => plan.status === "active" && plan.channel === "chat");
   const activeProactivePlan = activeProactivePlanId
     ? activeChatPlans.find((plan) => plan.id === activeProactivePlanId) ?? null
     : null;
 
   function markRead(id: string) {
-    setNotifications((prev) => prev.map((n) => n.id === id ? { ...n, read: true } : n));
-    setExpandedNotifId((prev) => (prev === id ? null : id));
+    setNotifications((prev) => prev.some(n => n.id === id && !n.read)
+      ? prev.map(n => n.id === id ? { ...n, read: true } : n) : prev);
   }
 
   useEffect(() => {
-    setNotifications(buildPlayerNotifications(deliveryPlans));
-  }, [deliveryPlans]);
+    setNotifications(buildPlayerNotifications(deliveryPlans.filter(p => p.day <= (account?.day || 1))).map(n => ({ ...n, read: saved.readNotifications?.includes(n.id) || n.read })));
+  }, [deliveryPlans, account?.day]);
+
+  useEffect(() => {
+    if (!account || messages.length === 0) return;
+    const state = { segment, messages: messages.slice(-100), chipMode, activeProactivePlanId, journeyStage, shownTopicIds: [...shownTopicIds], controlScheme, readNotifications: notifications.filter(n => n.read).map(n => n.id), npsDone, npsRead, localConversationId, lastProactiveDay, reportedQueries: [...reportedQueries] };
+    const flush = () => { if (PUBLIC_TRIAL) trialRequest('/api/player/state', { state }); else navigator.sendBeacon('/api/player/state', new Blob([JSON.stringify({ state })], { type: 'application/json' })); };
+    window.addEventListener('pagehide', flush);
+    const timer = setTimeout(() => {
+      void request('/api/player/state', { state }, 'PUT').then(() => setSaveError('')).catch(e => setSaveError(e.message));
+    }, 250);
+    return () => { clearTimeout(timer); window.removeEventListener('pagehide', flush); };
+  }, [messages, chipMode, activeProactivePlanId, journeyStage, shownTopicIds, controlScheme, notifications, npsDone, npsRead, lastProactiveDay, reportedQueries]);
 
   useEffect(() => {
     const firstPlan = deliveryPlans.find((plan) => plan.status === "active" && plan.channel === "chat" && plan.isStart)
       ?? deliveryPlans.find((plan) => plan.status === "active" && plan.channel === "chat");
+    if (saved.messages?.length) {
+      // Preserve an unfinished branch. A later-day check-in starts only on a fresh visit.
+      const next = deliveryPlans.find(p => p.status === 'active' && p.channel === 'chat' && p.dailyEntry && p.day === account?.day);
+      if (!saved.activeProactivePlanId && (saved.lastProactiveDay || 1) < (account?.day || 1) && next) {
+        setMessages(prev => [...prev, { id: uid(), role: 'assistant', text: next.message }]);
+        setActiveProactivePlanId(next.id); setChipMode(null); setJourneyStage(next.stageId); setLastProactiveDay(account?.day || 1);
+      }
+      return;
+    }
+    setLastProactiveDay(account?.day || 1);
     setMessages([
       {
         id: uid(),
@@ -1746,10 +1725,23 @@ function CoachScreen({
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
-    endRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, isTyping]);
+    const previousCount = previousMessageCount.current;
+    previousMessageCount.current = messages.length;
+    const pane = chatScrollRef.current;
+    if (!pane || !messages.length || messages.length === previousCount) return;
+    // Start at the first reply in a new batch, not its final card or video.
+    const newReply = messages.findIndex((message, index) => index >= previousCount && message.role === 'assistant');
+    const index = newReply >= 0 ? newReply : messages.length - 1;
+    const target = pane.querySelector<HTMLElement>(`[data-chat-index="${index}"]`);
+    if (target) {
+      const padding = parseFloat(getComputedStyle(pane).paddingTop) || 0;
+      pane.scrollTo({ top: pane.scrollTop + target.getBoundingClientRect().top - pane.getBoundingClientRect().top - padding, behavior: 'instant' });
+    }
+    // Typing, thumbnail loads and feedback updates must not pull readers down.
+  }, [messages]);
 
   function append(msgs: Omit<Message, "id">[]) {
+    for (const m of msgs.filter(m => m.role === 'user')) void request('/api/events', { type: 'question', text: m.text, conversationId: localConversationId }).catch(e => setSaveError(e.message));
     setMessages((prev) => [...prev, ...msgs.map((m) => ({ ...m, id: uid() }))]);
   }
 
@@ -1786,20 +1778,22 @@ function CoachScreen({
     setChipMode(null);
     append([{ role: "user", text: label }]);
     const topic = findKnowledge(topicId);
-    const answer = getCannedAnswer(topicId, topic, controlScheme, answerConfigs);
+    const answer = getCannedAnswer(topicId, topic, controlScheme, answerConfigs, language);
     const alreadyShown = shownTopicIds.has(topicId);
     botDelay(() => {
       if (!alreadyShown) showTopic(topicId);
       append([
         {
           role: "assistant",
+          language,
           text: alreadyShown
-            ? `เราเคยเปิดเรื่อง ${topic?.title ?? label} แล้วครับ ตอนนี้ติดขั้นตอนไหนเป็นพิเศษ?`
+            ? t(`เราเคยเปิดเรื่อง ${topic?.title ?? label} แล้วครับ ตอนนี้ติดขั้นตอนไหนเป็นพิเศษ?`, 'Which part of that guide would you like help with?')
             : answer.text,
+          feedbackEligible: !alreadyShown,
           steps: alreadyShown ? undefined : answer.steps,
           knowledgeId: alreadyShown ? undefined : topicId,
         },
-        { role: "assistant", text: "ดูแล้วเป็นอย่างไรบ้าง?" },
+        { role: "assistant", text: t("ดูแล้วเป็นอย่างไรบ้าง?", 'How did it go?'), language },
       ]);
       setChipMode("post-content");
     });
@@ -1867,7 +1861,8 @@ function CoachScreen({
     }, 450);
   }
 
-  function handleProactiveChoice(branch: ProactiveBranch) {
+  async function handleProactiveChoice(branch: ProactiveBranch) {
+    try { await request('/api/auth/session'); } catch (e) { setSaveError((e as Error).message); window.dispatchEvent(new Event('rookie-access-expired')); return; }
     setChipMode(null);
     append([{ role: "user", text: branch.choice }]);
 
@@ -1885,16 +1880,18 @@ function CoachScreen({
       }
 
       const replies: Omit<Message, "id">[] = [];
-      if (branch.reply.trim()) replies.push({ role: "assistant", text: branch.reply.trim() });
+      if (branch.reply.trim()) replies.push({ role: "assistant", text: branch.reply.trim(), feedbackEligible: !isPromptText(branch.reply) });
 
       if (branch.contentId) {
         const topic = KNOWLEDGE.find((knowledge) => knowledge.topicId === branch.contentId);
         if (topic) {
-          const answer = getCannedAnswer(topic.id, topic, controlScheme, answerConfigs);
+          const answer = getCannedAnswer(topic.id, topic, controlScheme, answerConfigs, language);
           showTopic(topic.id);
           replies.push({
             role: "assistant",
             text: answer.text,
+            language,
+            feedbackEligible: true,
             steps: answer.steps,
             knowledgeId: topic.id,
           });
@@ -1909,14 +1906,33 @@ function CoachScreen({
   // ─ Free-text send ─────────────────────────────────────────────────────────
 
   async function answerQuestion(question: string) {
+    const recentLanguage = messages.filter(message => message.role === 'user').reduce<AnswerLanguage>((previous, message) => selectAnswerLanguage(message.text, previous), language);
+    const replyLanguage = selectAnswerLanguage(question, recentLanguage);
+    try { await request('/api/auth/session'); } catch (e) { setSaveError((e as Error).message); setIsTyping(false); window.dispatchEvent(new Event('rookie-access-expired')); return; }
+    if (/^(ยังงง|งง|ไม่เข้าใจ|ยังไม่เข้าใจ|confused|still confused|i(?:'m| am) confused|i don'?t understand)[.!?\s]*$/i.test(question.trim())) {
+      const previous = [...messages].reverse().find(message => message.role === 'assistant' && message.feedbackEligible);
+      if (previous) {
+        setIsTyping(false);
+        append([{ role: 'assistant', language: replyLanguage, feedbackEligible: false,
+          text: replyLanguage === 'en'
+            ? 'Which part of that answer is unclear? Tell me the step or what happens when you try, and we can work through it.'
+            : 'ติดตรงไหนของคำตอบเมื่อกี้ครับ? บอกขั้นตอนที่งง หรือว่าเวลาลองแล้วเกิดอะไรขึ้น เดี๋ยวค่อย ๆ ดูกันครับ' }]);
+        return;
+      }
+    }
     if (isMoneyQuestion(question)) {
+      void request('/api/events', { type: 'knowledge' }).catch(() => {});
       const moneyTopics = ["welcome-pass", "mission-hub"];
       moneyTopics.forEach(showTopic);
       setTimeout(() => {
         setIsTyping(false);
         append([{
           role: "assistant",
-          text: "เริ่มจาก Welcome Pass เพื่อรับของเริ่มต้น แล้วเข้า Mission Hub ทำภารกิจและรับรางวัลต่อครับ",
+          language: replyLanguage,
+          text: replyLanguage === 'en'
+            ? 'Looking for rewards to get your squad going? Let’s start here.\n\nStart with Welcome Pass for starter rewards, then visit Mission Hub to complete missions and claim more rewards.'
+            : "กำลังหาของมาเริ่มทำทีมใช่ไหมครับ ลองเริ่มตรงนี้ได้เลย\n\nเริ่มจาก Welcome Pass เพื่อรับของเริ่มต้น แล้วเข้า Mission Hub ทำภารกิจและรับรางวัลต่อครับ",
+          feedbackEligible: true,
           relatedIds: moneyTopics,
         }]);
       }, 450);
@@ -1925,36 +1941,38 @@ function CoachScreen({
 
     const manualAnswer = matchManualAnswer(question, answerConfigs);
     if (manualAnswer) {
-      const answer = getCannedAnswer(manualAnswer.id, undefined, controlScheme, answerConfigs);
+      void request('/api/events', { type: 'knowledge' }).catch(() => {});
+      const answer = getCannedAnswer(manualAnswer.id, undefined, controlScheme, answerConfigs, replyLanguage, !shownTopicIds.has(manualAnswer.id));
       const alreadyShown = shownTopicIds.has(manualAnswer.id);
       if (!alreadyShown) showTopic(manualAnswer.id);
       setTimeout(() => {
         setIsTyping(false);
         append([{
           role: "assistant",
-          text: alreadyShown
-            ? `เราเพิ่งคุยเรื่อง ${manualAnswer.title} ไปแล้วครับ ตอนนี้ติดขั้นตอนไหนเป็นพิเศษ?`
-            : answer.text,
-          steps: alreadyShown ? undefined : answer.steps,
+          language: replyLanguage,
+          text: answer.text,
+          feedbackEligible: true,
+          steps: answer.steps,
         }]);
       }, 450);
       return;
     }
 
-    const matched = matchKnowledge(question);
+    const matched = matchKnowledge(question, answerConfigs);
     if (matched) {
+      void request('/api/events', { type: 'knowledge' }).catch(() => {});
       const knowledge = findKnowledge(matched.id);
-      const answer = getCannedAnswer(matched.id, knowledge, controlScheme, answerConfigs);
+      const answer = getCannedAnswer(matched.id, knowledge, controlScheme, answerConfigs, replyLanguage, !shownTopicIds.has(matched.id));
       const alreadyShown = shownTopicIds.has(matched.id);
       if (!alreadyShown) showTopic(matched.id);
       setTimeout(() => {
         setIsTyping(false);
         append([{
           role: "assistant",
-          text: alreadyShown
-            ? `เราเพิ่งคุยเรื่อง ${knowledge?.title ?? matched.title} ไปแล้วครับ ตอนนี้ติดขั้นตอนไหนเป็นพิเศษ? บอกชื่อปุ่มหรือจังหวะที่งงได้เลย`
-            : answer.text,
-          steps: alreadyShown ? undefined : answer.steps,
+          language: replyLanguage,
+          text: answer.text,
+          feedbackEligible: true,
+          steps: answer.steps,
           knowledgeId: alreadyShown ? undefined : matched.id,
         }]);
       }, 550);
@@ -1972,13 +1990,22 @@ function CoachScreen({
           context: messages
             .filter((message) => message.role === "user" || message.role === "assistant")
             .slice(-6)
-            .map((message) => ({ role: message.role, text: message.text })),
+            .map((message) => ({ role: message.role, text: [message.text, ...(message.steps || [])].join('\n') })),
         }),
       });
       const result = await response.json();
+      if (response.status === 429) {
+        setIsTyping(false);
+        append([{ role: 'assistant', language: replyLanguage, text: replyLanguage === 'en' ? 'A few too many questions at once — please try again in a minute.' : 'ตอนนี้มีคำถามเข้ามาค่อนข้างเยอะครับ รอสักหนึ่งนาทีแล้วลองใหม่ได้เลย', feedbackEligible: false }]);
+        return;
+      }
       if (!response.ok || typeof result.answer !== "string" || !result.answer.trim()) {
         throw new Error("AI fallback unavailable");
       }
+      const cleaned = normalizeAiResponse(result.answer, result.actions);
+      if (!cleaned.answer) throw new Error('AI fallback returned an empty answer');
+      result.answer = cleaned.answer;
+      result.actions = cleaned.actions;
 
       if (typeof result.conversationId === "string") {
         setConversationId(result.conversationId);
@@ -1995,19 +2022,27 @@ function CoachScreen({
       append([{
         role: "assistant",
         text: adaptButtonLabels(result.answer.trim(), controlScheme),
+        language: replyLanguage,
+        feedbackEligible: !actions.includes('report_question') && !isPromptText(result.answer),
         aiSource: "AI-INsea",
         actions,
         reportQuestion: actions.includes("report_question") ? question : undefined,
       }]);
+      void request('/api/events', { type: 'ai' }).catch(() => {});
+      if (actions.includes('report_question')) {
+        try { await request('/api/unanswered', { question, reason: 'ai_unanswered' }); setReportedQueries(prev => new Set([...prev, question])); } catch (e) { setSaveError((e as Error).message); }
+      }
     } catch {
-      const relatedIds = FALLBACK_RELATED_IDS.filter((id) => !shownTopicIds.has(id)).slice(0, 2);
-      relatedIds.forEach((id) => showTopic(id));
+      void request('/api/events', { type: 'system_error', text: question }).catch(() => {});
+      try { await request('/api/unanswered', { question, reason: 'system_error' }); setReportedQueries(prev => new Set([...prev, question])); } catch (e) { setSaveError((e as Error).message); }
       setIsTyping(false);
       append([{
         role: "assistant",
-        text: "ค้นจากฐานความรู้ 48 หัวข้อแล้ว ยังไม่เจอคำตอบตรง ๆ\nลองดูคลิปที่เกี่ยวข้อง หรือส่งคำถามนี้ให้ทีมเพิ่มข้อมูลได้ครับ",
+        language: replyLanguage,
+        text: replyLanguage === 'en'
+          ? "I couldn’t connect to the assistant just now. Please try again shortly, or ask the FC Online community."
+          : "ตอนนี้เชื่อมต่อผู้ช่วย AI ไม่สำเร็จครับ ลองอีกครั้งสักครู่ หรือสอบถามชุมชน FC Online ต่อได้เลย",
         aiSource: "mock",
-        relatedIds: relatedIds.length > 0 ? relatedIds : undefined,
         showDiscord: true,
         reportQuestion: question,
       }]);
@@ -2015,7 +2050,7 @@ function CoachScreen({
   }
 
   function handleSend() {
-    if (!input.trim()) return;
+    if (!input.trim() || isTyping) return;
     const text = input.trim();
     const currentProactivePlan = activeProactivePlan;
     setInput("");
@@ -2039,7 +2074,7 @@ function CoachScreen({
     if (currentProactivePlan?.elseAction === "reply" && currentProactivePlan.elseReply.trim()) {
       setTimeout(() => {
         setIsTyping(false);
-        append([{ role: "assistant", text: currentProactivePlan.elseReply.trim() }]);
+        append([{ role: "assistant", text: currentProactivePlan.elseReply.trim(), feedbackEligible: !isPromptText(currentProactivePlan.elseReply) }]);
       }, 450);
       return;
     }
@@ -2047,13 +2082,16 @@ function CoachScreen({
   }
 
   function sendFaq(faq: FaqConfigItem) {
+    if (isTyping) return;
     setActiveTab("chat");
     setInput("");
     setChipMode(null);
-    append([{ role: "user", text: faq.question }]);
+    setActiveProactivePlanId(null);
+    const question = language === 'en' ? englishFaqQuestion(faq) || faq.question : faq.question;
+    append([{ role: "user", text: question, language }]);
     setIsTyping(true);
-    if (isMoneyQuestion(faq.question)) {
-      void answerQuestion(faq.question);
+    if (isMoneyQuestion(question)) {
+      void answerQuestion(question);
       return;
     }
 
@@ -2066,7 +2104,8 @@ function CoachScreen({
       ? answerConfigs.find((answer) => answer.isManual && answer.id === faq.secondaryTopicId)
       : undefined;
     if (manualPrimary) {
-      const answer = getCannedAnswer(manualPrimary.id, undefined, controlScheme, answerConfigs);
+      void request('/api/events', { type: 'knowledge' }).catch(() => {});
+      const answer = getCannedAnswer(manualPrimary.id, undefined, controlScheme, answerConfigs, language, !shownTopicIds.has(manualPrimary.id));
       showTopic(manualPrimary.id);
       if (manualSecondary) showTopic(manualSecondary.id);
       setTimeout(() => {
@@ -2074,17 +2113,20 @@ function CoachScreen({
         append([{
           role: "assistant",
           text: answer.text,
+          language,
+          feedbackEligible: true,
           steps: answer.steps,
         }]);
       }, 450);
       return;
     }
     if (!primary) {
-      void answerQuestion(faq.question);
+      void answerQuestion(question);
       return;
     }
 
-    const answer = getCannedAnswer(primary.id, primary, controlScheme, answerConfigs);
+    const answer = getCannedAnswer(primary.id, primary, controlScheme, answerConfigs, language, !shownTopicIds.has(primary.id));
+    void request('/api/events', { type: 'knowledge' }).catch(() => {});
     showTopic(primary.id);
     if (secondary) showTopic(secondary.id);
     setTimeout(() => {
@@ -2092,6 +2134,8 @@ function CoachScreen({
       append([{
         role: "assistant",
         text: answer.text,
+        language,
+        feedbackEligible: true,
         steps: answer.steps,
         knowledgeId: secondary ? undefined : primary.id,
         relatedIds: secondary ? [primary.id, secondary.id] : undefined,
@@ -2099,7 +2143,7 @@ function CoachScreen({
     }, 450);
   }
 
-  const FAQ_CHIPS = faqConfigs.filter((faq) => faq.question.trim().length > 0);
+  const FAQ_CHIPS = faqConfigs.filter((faq) => faq.question.trim().length > 0 && (language === 'th' || Boolean(englishFaqQuestion(faq))));
 
   const chipSets: Record<NonNullable<ChipMode>, { label: string; action: () => void }[]> = {
     activation: [
@@ -2134,7 +2178,7 @@ function CoachScreen({
     : chipMode ? chipSets[chipMode] : [];
 
   return (
-    <div className="h-screen flex overflow-hidden" style={{ backgroundColor: "var(--background)" }}>
+    <div className="h-dvh flex overflow-hidden" style={{ backgroundColor: "var(--background)" }}>
       {/* Desktop left nav */}
       <nav
         aria-label="เมนูหลัก"
@@ -2159,7 +2203,7 @@ function CoachScreen({
             onMouseLeave={(e) => { if (activeTab !== "chat") e.currentTarget.style.backgroundColor = "transparent"; }}
           >
             <MessageCircle size={18} aria-hidden />
-            โค้ช
+            {t('โค้ช', 'Coach')}
           </button>
 
           <button
@@ -2178,15 +2222,15 @@ function CoachScreen({
                 <span className="absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full" style={{ backgroundColor: "var(--primary)" }} />
               )}
             </span>
-            แจ้งเตือน
+            {t('แจ้งเตือน', 'Notifications')}
           </button>
 
           <div className="mt-4 mx-1 pt-3" style={{ borderTop: "1px solid var(--border)" }}>
             <p className="px-2 mb-1.5 text-[10px] font-semibold uppercase tracking-wider" style={{ color: "var(--muted-foreground)" }}>
-              วิธีควบคุม
+              {t('วิธีควบคุม', 'Controls')}
             </p>
             {([
-              { id: "keyboard" as ControlScheme, label: "คีย์บอร์ด", icon: <Keyboard size={15} aria-hidden /> },
+              { id: "keyboard" as ControlScheme, label: t('คีย์บอร์ด', 'Keyboard'), icon: <Keyboard size={15} aria-hidden /> },
               { id: "xbox" as ControlScheme, label: "Xbox · XYAB", icon: <Gamepad2 size={15} aria-hidden /> },
               { id: "playstation" as ControlScheme, label: "PS · □ △ ○ ✕", icon: <Gamepad2 size={15} aria-hidden /> },
             ]).map((option) => {
@@ -2219,35 +2263,37 @@ function CoachScreen({
             onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = "transparent")}
           >
             <LogOut size={16} aria-hidden />
-            ออกจากระบบ
+            {t('ออกจากระบบ', 'Sign out')}
           </button>
         </div>
       </nav>
 
       {/* Main column */}
-      <div className="flex-1 flex flex-col overflow-hidden">
+      <div className="flex-1 min-w-0 flex flex-col overflow-hidden">
         {/* Header */}
         <header
-          className="flex items-center px-4 md:px-6 py-3 shrink-0 border-b"
+          className="flex items-center gap-3 flex-wrap px-4 md:px-6 py-3 shrink-0 border-b"
           style={{ borderColor: "var(--border)", backgroundColor: "var(--background)" }}
         >
-          <div className="flex flex-col gap-0.5">
+          <CoachMascot className="w-10 h-10 shrink-0" />
+          <div className="flex flex-col gap-0.5 mr-auto">
             <span className="text-xs font-semibold" style={{ color: "var(--primary)" }}>
-              โค้ชมือใหม่
+              {t('โค้ชมือใหม่', 'Rookie Coach')}
             </span>
             <span className="text-xs" style={{ color: "var(--muted-foreground)" }}>
-              ถามเรื่องเกม ทีม และรางวัลได้เลย
+              {t('ถามเรื่องเกม ทีม และรางวัลได้เลย', 'Gameplay, squads and rewards')}
             </span>
           </div>
-          <label className="md:hidden ml-auto">
-            <span className="sr-only">วิธีควบคุม</span>
+          <LanguageSwitcher />
+          <label className="md:hidden">
+            <span className="sr-only">{t('วิธีควบคุม', 'Controls')}</span>
             <select
               value={controlScheme}
               onChange={(event) => chooseControlScheme(event.target.value as ControlScheme)}
               className="h-8 px-2 rounded-md text-xs outline-none"
               style={{ border: "1px solid var(--border)", color: "var(--foreground)", backgroundColor: "var(--card)" }}
             >
-              <option value="keyboard">คีย์บอร์ด</option>
+              <option value="keyboard">{t('คีย์บอร์ด', 'Keyboard')}</option>
               <option value="xbox">Xbox · XYAB</option>
               <option value="playstation">PS · □ △ ○ ✕</option>
             </select>
@@ -2255,17 +2301,20 @@ function CoachScreen({
         </header>
 
         {/* ── Notification inbox ───────────────────────────────────────────── */}
+        {saveError && <p role="alert" className="px-4 py-2 bg-amber-50 text-sm">ยังบันทึกประวัติไม่สำเร็จ: {saveError}</p>}
+        {hasUnread && !toastDismissed && !isFirstChat && activeTab === 'chat' && <div className="flex items-center gap-3 px-4 py-3 bg-red-50 border-b"><button className="text-sm flex-1 text-left" onClick={() => { setActiveTab('notifications'); setToastDismissed(true); }}>{t('🔔 มีคำแนะนำใหม่สำหรับคุณ · ดูแจ้งเตือน', '🔔 New tips for you · View notifications')}</button><button aria-label={t('ปิดแจ้งเตือน', 'Dismiss notification')} onClick={() => setToastDismissed(true)}>✕</button></div>}
+        {npsOpen && <Nps onClose={() => setNpsOpen(false)} onDone={() => { setNpsOpen(false); setNpsDone(true); }} />}
         {activeTab === "notifications" && (
           <div className="flex-1 overflow-y-auto px-4 md:px-8 py-5 pb-[calc(1.25rem+56px)] md:pb-5">
-            <h2 className="text-base font-semibold mb-4" style={{ color: "var(--foreground)" }}>แจ้งเตือน</h2>
+            <h2 className="text-base font-semibold mb-4" style={{ color: "var(--foreground)" }}>{t('แจ้งเตือน', 'Notifications')}</h2>
             <div className="flex flex-col gap-2 max-w-lg">
+              {npsEligible && <button className="text-left rounded-xl border p-4 bg-white" onClick={() => { setNpsRead(true); setNpsOpen(true); }}><span className="flex items-center gap-2 font-medium text-sm"><Clock size={16} />{!npsRead && <span className="w-2 h-2 rounded-full bg-red-600" />}ประเมิน Rookie Coach</span><span className="block text-sm text-stone-500 mt-1">อยากแนะนำให้เพื่อนแค่ไหน? ให้คะแนน 0–10</span></button>}
               {notifications.map((notif) => {
-                const isExpanded = expandedNotifId === notif.id;
                 const linkedTopic = notif.topicId ? findKnowledge(notif.topicId) : undefined;
                 return (
-                  <button
+                  <div
                     key={notif.id}
-                    onClick={() => markRead(notif.id)}
+                    onClickCapture={() => markRead(notif.id)}
                     className="w-full text-left rounded-xl px-4 py-3 transition-colors"
                     style={{
                       backgroundColor: notif.read ? "var(--card)" : "rgba(196,30,30,0.05)",
@@ -2281,27 +2330,24 @@ function CoachScreen({
                       </span>
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center justify-between gap-2">
-                          <span
+                          <button onClick={() => markRead(notif.id)}
                             className="text-sm font-medium leading-snug"
                             style={{ color: notif.read ? "var(--foreground)" : "var(--foreground)", fontWeight: notif.read ? 400 : 600 }}
                           >
                             {notif.title}
-                          </span>
+                          </button>
                           <span className="text-[11px] shrink-0" style={{ color: "var(--muted-foreground)" }}>{notif.time}</span>
                         </div>
-                        {isExpanded ? (
-                          <div className="mt-2 flex flex-col gap-3">
-                            <p className="text-sm" style={{ color: "var(--muted-foreground)" }}>{notif.body}</p>
-                            {linkedTopic && <KnowledgeCard item={linkedTopic} />}
-                          </div>
-                        ) : (
-                          <p className="text-xs mt-0.5 truncate" style={{ color: "var(--muted-foreground)" }}>{notif.body}</p>
-                        )}
+                        <div className="mt-2 flex flex-col gap-3">
+                          {notif.body && <p className="text-sm" style={{ color: "var(--muted-foreground)" }}>{notif.body}</p>}
+                          {linkedTopic && <KnowledgeCard item={linkedTopic} answer={answerConfigs.find(answer => answer.id === linkedTopic.id)} />}
+                        </div>
                       </div>
                     </div>
-                  </button>
+                  </div>
                 );
               })}
+              {notifications.length === 0 && !npsEligible && <p className="text-sm text-stone-500">{t('ยังไม่มีแจ้งเตือนใหม่ครับ', 'No new notifications yet.')}</p>}
             </div>
           </div>
         )}
@@ -2310,8 +2356,11 @@ function CoachScreen({
         {activeTab === "chat" && (
           <>
             {/* Message timeline */}
-            <div className="flex-1 overflow-y-auto px-4 md:px-8 py-5 flex flex-col gap-3">
-              {messages.map((msg) => {
+            {!isFirstChat && <div ref={chatScrollRef} className="flex-1 overflow-y-auto px-4 md:px-8 py-5 flex flex-col gap-3" style={{ overflowAnchor: 'none' }}>
+              {messages.map((storedMessage, messageIndex) => {
+                const cleaned = storedMessage.role === 'assistant' && storedMessage.aiSource === 'AI-INsea'
+                  ? normalizeAiResponse(storedMessage.text, storedMessage.actions) : undefined;
+                const msg = cleaned ? { ...storedMessage, text: cleaned.answer, actions: cleaned.actions } : storedMessage;
                 if (msg.role === "separator") {
                   return (
                     <div key={msg.id} className="flex items-center justify-center my-2">
@@ -2327,7 +2376,7 @@ function CoachScreen({
 
                 if (msg.role === "user") {
                   return (
-                    <div key={msg.id} className="flex justify-end">
+                    <div key={msg.id} data-chat-index={messageIndex} className="flex justify-end shrink-0">
                       <div
                         className="max-w-[72%] px-4 py-2.5 rounded-2xl rounded-tr-sm text-sm"
                         style={{ backgroundColor: "var(--muted)", color: "var(--foreground)" }}
@@ -2340,8 +2389,11 @@ function CoachScreen({
 
                 // assistant
                 const topic = msg.knowledgeId ? findKnowledge(msg.knowledgeId) : undefined;
+                const clipTopicId = topic?.id ?? msg.relatedIds?.[0];
+                const clipIntro = clipTopicId ? conversationCopy(answerConfigs.find(answer => answer.id === clipTopicId), msg.language ?? language, clipTopicId).clipIntro : '';
                 return (
-                  <div key={msg.id} className="flex justify-start">
+                  <div key={msg.id} data-chat-index={messageIndex} className="flex justify-start gap-2 shrink-0">
+                    <CoachMascot className="w-9 h-9 shrink-0" />
                     <div className="max-w-[85%] md:max-w-lg flex flex-col gap-2">
                       {msg.text ? (
                         <div
@@ -2366,10 +2418,12 @@ function CoachScreen({
                           )}
                         </div>
                       ) : null}
-                      {topic ? <KnowledgeCard item={topic} /> : null}
+                      {clipIntro && <p className="text-sm px-4 py-2" style={{ color: 'var(--foreground)' }}>{adaptButtonLabels(clipIntro, controlScheme)}</p>}
+                      {topic ? <KnowledgeCard item={topic} answer={answerConfigs.find(answer => answer.id === topic.id)} language={msg.language} /> : null}
+                      {!PUBLIC_TRIAL && canRateMessage(msg) && <Rating language={msg.language ?? language} messageId={msg.id} text={msg.text} question={messages.slice(0, messageIndex).reverse().find(m => m.role === 'user')?.text || ''} />}
                       {msg.relatedIds?.map((rid) => {
                         const relTopic = findKnowledge(rid);
-                        return relTopic ? <KnowledgeCard key={rid} item={relTopic} /> : null;
+                        return relTopic ? <KnowledgeCard key={rid} item={relTopic} answer={answerConfigs.find(answer => answer.id === rid)} language={msg.language} /> : null;
                       })}
                       {msg.showDiscord && (
                         <a
@@ -2425,7 +2479,7 @@ function CoachScreen({
                         return (
                           <button
                             disabled={alreadyReported}
-                            onClick={() => {
+                            onClick={async () => {
                               if (alreadyReported) return;
                               setReportedQueries((prev) => new Set([...prev, q]));
                               const ctx = messages
@@ -2433,8 +2487,13 @@ function CoachScreen({
                                 .slice(-3)
                                 .map((m) => m.text)
                                 .join(" → ");
-                              onReportQuestion(q, ctx);
-                              append([{ role: "assistant", text: "ส่งคำถามให้ทีมแล้ว ขอบคุณครับ" }]);
+                              try {
+                                await onReportQuestion(q, ctx);
+                                append([{ role: "assistant", text: "ส่งคำถามให้ทีมแล้ว ขอบคุณครับ" }]);
+                              } catch {
+                                setReportedQueries(prev => { const next = new Set(prev); next.delete(q); return next; });
+                                append([{ role: "assistant", text: "ยังส่งคำถามไม่สำเร็จ กรุณาลองอีกครั้งครับ" }]);
+                              }
                             }}
                             className="text-xs px-3 py-1.5 rounded-lg border transition-colors w-fit"
                             style={{
@@ -2465,43 +2524,52 @@ function CoachScreen({
                   ))}
                 </div>
               )}
-              <div ref={endRef} />
-            </div>
+            </div>}
 
             {/* Chips + Composer footer */}
             <div
-              className="px-4 md:px-6 pt-3 pb-[calc(0.75rem+56px)] md:pb-5 flex flex-col gap-2 shrink-0"
-              style={{ borderTop: "1px solid var(--border)", backgroundColor: "var(--background)" }}
+              className={isFirstChat ? 'chat-launch px-4 md:px-6' : 'px-4 md:px-6 pt-3 pb-[calc(0.75rem+56px)] md:pb-5 flex flex-col gap-2 shrink-0'}
+              style={{ borderTop: isFirstChat ? undefined : "1px solid var(--border)", backgroundColor: "var(--background)" }}
             >
-              <div className="max-w-2xl mx-auto w-full flex flex-col gap-2">
+              <div className="chat-input-content mx-auto w-full flex flex-col gap-3">
+                {isFirstChat && <div className="chat-launch-intro">
+                  <CoachMascot className="chat-launch-mascot" />
+                  <h1>{t('ให้ผมช่วยอะไรดีครับ?', 'How can I help you?')}</h1>
+                  {messages[0]?.text && <p className="welcome-question">{messages[0].text}</p>}
+                  {activeChips.length > 0 && <div className="flex flex-wrap justify-center gap-2 mt-3">
+                    {activeChips.map(chip => <button disabled={isTyping} key={chip.label} onClick={chip.action} className="welcome-choice">{chip.label}</button>)}
+                  </div>}
+                </div>}
                 {/* FAQ strip — always visible */}
                 <div className="flex flex-col gap-1">
                   <span className="text-[10px] font-semibold tracking-wide uppercase" style={{ color: "var(--muted-foreground)" }}>
-                    คำถามที่พบบ่อย
+                    {t('คำถามที่พบบ่อย', 'Frequently asked questions')}
                   </span>
-                  <div className="flex flex-wrap gap-1.5">
+                  <div className="faq-strip flex flex-wrap gap-1.5">
                     {FAQ_CHIPS.map((faq) => (
                       <button
                         key={faq.id}
                         onClick={() => sendFaq(faq)}
-                        className="h-7 px-3 rounded-full text-xs border transition-colors"
+                        disabled={isTyping}
+                        className="min-h-9 py-1.5 px-3 rounded-full text-xs border transition-colors disabled:opacity-50"
                         style={{ borderColor: "var(--border)", color: "var(--muted-foreground)", backgroundColor: "transparent" }}
                         onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = "var(--muted)")}
                         onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = "transparent")}
                       >
-                        {faq.question}
+                        {language === 'en' ? englishFaqQuestion(faq) : faq.question}
                       </button>
                     ))}
                   </div>
                 </div>
 
                 {/* Context chips */}
-                {activeChips.length > 0 && (
+                {!isFirstChat && activeChips.length > 0 && (
                   <div className="flex flex-wrap gap-2">
                     {activeChips.map((chip) => (
                       <button
                         key={chip.label}
                         onClick={chip.action}
+                        disabled={isTyping}
                         className="h-9 px-4 rounded-full text-sm font-medium border transition-colors"
                         style={{ borderColor: "var(--border)", color: "var(--foreground)", backgroundColor: "transparent" }}
                         onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = "var(--muted)")}
@@ -2512,7 +2580,8 @@ function CoachScreen({
                     ))}
                   </div>
                 )}
-                <Composer input={input} setInput={setInput} onSend={handleSend} textareaRef={composerRef} />
+                <Composer input={input} setInput={setInput} onSend={handleSend} textareaRef={composerRef} large={isFirstChat} disabled={isTyping} />
+                {language === 'en' && <p className="text-[11px] text-stone-500 text-center">Videos and team-written proactive messages may be in Thai.</p>}
               </div>
             </div>
           </>
@@ -2531,7 +2600,7 @@ function CoachScreen({
           style={{ color: activeTab === "chat" ? "var(--primary)" : "var(--muted-foreground)" }}
         >
           <MessageCircle size={18} aria-hidden />
-          โค้ช
+          {t('โค้ช', 'Coach')}
         </button>
         <button
           onClick={() => setActiveTab("notifications")}
@@ -2544,7 +2613,7 @@ function CoachScreen({
               <span className="absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full" style={{ backgroundColor: "var(--primary)" }} />
             )}
           </span>
-          แจ้งเตือน
+          {t('แจ้งเตือน', 'Notifications')}
         </button>
         <button
           onClick={onLogout}
@@ -2553,7 +2622,7 @@ function CoachScreen({
           aria-label="ออกจากระบบ"
         >
           <LogOut size={16} aria-hidden />
-          ออก
+          {t('ออก', 'Sign out')}
         </button>
       </nav>
     </div>
@@ -2632,7 +2701,7 @@ const INITIAL_DAILY_DELIVERY_PLANS: DailyDeliveryPlan[] = [
     status: "active",
   },
   {
-    id: "pm-4", day: 2, stageId: "competence", name: "ถามต่อหลังส่งคำตอบ", channel: "chat", isStart: false,
+    id: "pm-4", day: 2, stageId: "competence", name: "ถามต่อหลังส่งคำตอบ", channel: "chat", isStart: false, dailyEntry: true,
     message: "ลองแล้วเป็นอย่างไรบ้าง?",
     branches: [
       { id: "pm-4-if", kind: "if", choice: "เข้าใจแล้ว", action: "next_question", reply: "", nextPlanId: "pm-5" },
@@ -2643,7 +2712,7 @@ const INITIAL_DAILY_DELIVERY_PLANS: DailyDeliveryPlan[] = [
     status: "active",
   },
   {
-    id: "pm-5", day: 3, stageId: "next-goal", name: "เลือกเป้าหมายถัดไป", channel: "chat", isStart: false,
+    id: "pm-5", day: 3, stageId: "next-goal", name: "เลือกเป้าหมายถัดไป", channel: "chat", isStart: false, dailyEntry: true,
     message: "ต่อไปอยากทำอะไรใน FC Online?",
     branches: [
       { id: "pm-5-if", kind: "if", choice: "สร้างทีมให้ดีขึ้น", action: "reply", reply: "เริ่มจากทีมที่มี แล้วค่อยเติมตำแหน่งที่ขาดครับ", contentId: "FCO-EDU-041" },
@@ -2684,39 +2753,6 @@ const INITIAL_DAILY_DELIVERY_PLANS: DailyDeliveryPlan[] = [
   },
 ];
 
-const INITIAL_REPORTED_QUESTIONS: ReportedQuestion[] = [
-  {
-    id: "rq-1",
-    question: "วิธีเพิ่มพลังยิงทำยังไง",
-    onboardingDay: 2,
-    relatedTopicId: "FCO-EDU-001",
-    count: 4,
-    firstSeen: "2026-08-25",
-    lastSeen: "2026-08-28",
-    status: "reviewing",
-    recentContext: "ผู้ใช้ถามหลังจากดูคลิปการยิงประตู",
-  },
-  {
-    id: "rq-2",
-    question: "สแตมิน่าหมดเร็วมากต้องทำยังไง",
-    onboardingDay: 3,
-    count: 2,
-    firstSeen: "2026-08-26",
-    lastSeen: "2026-08-27",
-    status: "new",
-    recentContext: "ผู้ใช้ถามระหว่างฝึกดริบบอล",
-  },
-  {
-    id: "rq-3",
-    question: "ซื้อผู้เล่นจาก Transfer Market ยังไง",
-    onboardingDay: 3,
-    count: 7,
-    firstSeen: "2026-08-20",
-    lastSeen: "2026-08-28",
-    status: "new",
-    recentContext: "ผู้ใช้ถามหลังจากเข้าเมนู Squad",
-  },
-];
 
 const FAQ_CONFIG: FaqConfigItem[] = [
   { id: "faq-money", question: "หาเงินจากไหน", stageId: "next-goal", topicId: "FCO-EDU-007", secondaryTopicId: "FCO-EDU-018", trigger: "หาเงิน, หา BP, เงินไม่พอ, รางวัล" },
@@ -2728,6 +2764,13 @@ const FAQ_CONFIG: FaqConfigItem[] = [
 ];
 
 const FAQ_CONFIG_STORAGE_KEY = "fco-faq-config-v1";
+
+function englishFaqQuestion(faq: FaqConfigItem): string | undefined {
+  if (faq.questionEn !== undefined) {
+    return faq.questionEnSource === faq.question && faq.questionEn.trim() ? faq.questionEn.trim() : undefined;
+  }
+  return FAQ_ENGLISH_BY_QUESTION[faq.question];
+}
 
 function normalizeFaqConfigs(raw: unknown): FaqConfigItem[] {
   if (!Array.isArray(raw)) return FAQ_CONFIG;
@@ -2750,6 +2793,9 @@ function normalizeFaqConfigs(raw: unknown): FaqConfigItem[] {
     return [{
       id: candidate.id,
       question: candidate.question,
+      questionEn: typeof candidate.questionEn === 'string' ? candidate.questionEn : FAQ_ENGLISH_BY_QUESTION[candidate.question],
+      questionEnSource: typeof candidate.questionEnSource === 'string' ? candidate.questionEnSource
+        : candidate.questionEn === undefined && FAQ_ENGLISH_BY_QUESTION[candidate.question] ? candidate.question : undefined,
       stageId: candidate.stageId as JourneyStageId,
       topicId: candidate.topicId,
       secondaryTopicId,
@@ -2808,6 +2854,7 @@ function normalizeDeliveryPlans(raw: unknown): DailyDeliveryPlan[] {
       name: candidate.name as string,
       channel: candidate.channel as DeliveryChannel,
       isStart: typeof candidate.isStart === "boolean" ? candidate.isStart : planIndex === 0,
+      dailyEntry: candidate.dailyEntry === true,
       message: candidate.message as string,
       branches,
       elseAction: candidate.elseAction === "reply" || candidate.elseAction === "next_question" || candidate.elseAction === "ai_fallback"
@@ -2852,71 +2899,6 @@ function loadFaqConfigs(): FaqConfigItem[] {
   }
 }
 
-function AdminOverview({ plans, reportedQuestions }: { plans: DailyDeliveryPlan[]; reportedQuestions: ReportedQuestion[] }) {
-  const activeMessages = plans.filter((p) => p.status === "active").length;
-  const openQuestions = reportedQuestions.filter((q) => q.status === "new" || q.status === "reviewing").length;
-  const userMetrics = [
-    { label: "Total users", value: "1,284", note: "ผู้ใช้ทั้งหมดใน prototype" },
-    { label: "Guided users", value: "814", note: "ผู้เล่นใหม่ + กลับมาเล่น · 63.4%" },
-    { label: "Current players", value: "470", note: "ส่งต่อไป Hub / Discord · 36.6%" },
-    { label: "Active users · 7d", value: "642", note: "กลับมาใช้งานใน 7 วันล่าสุด" },
-  ];
-  const keyStats = [
-    { label: "Started chat", count: "596", rate: "73.2%", note: "ของ guided users" },
-    { label: "Answered by knowledge", count: "489", rate: "82.0%", note: "ของผู้ที่เริ่มแชท" },
-    { label: "AI fallback", count: "72", rate: "12.1%", note: "คำถามที่ต้องใช้ AI-INsea" },
-    { label: "Unanswered", count: "35", rate: "5.9%", note: "ต้องเพิ่มข้อมูลหรือให้ทีมตอบ" },
-    { label: "Content opened", count: "302", rate: "50.7%", note: "เปิดวิดีโอหรือคำแนะนำ" },
-    { label: "Hub / Discord clicks", count: "252", rate: "42.3%", note: "คลิกไปช่องทางถัดไป" },
-  ];
-
-  return (
-    <div className="flex-1 overflow-y-auto p-6 max-w-6xl">
-      <div className="mb-5 flex items-start justify-between gap-4">
-        <div>
-          <h2 className="text-base font-semibold" style={{ color: "var(--foreground)" }}>Overview</h2>
-          <p className="text-xs mt-1" style={{ color: "var(--muted-foreground)" }}>User volume, engagement and answer quality</p>
-        </div>
-        <div className="text-right">
-          <span className="text-[10px] px-2 py-1 rounded-full font-semibold" style={{ backgroundColor: "var(--muted)", color: "var(--muted-foreground)" }}>Demo data</span>
-          <p className="text-[10px] mt-1" style={{ color: "var(--muted-foreground)" }}>Last 7 days · analytics connection pending</p>
-        </div>
-      </div>
-
-      <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-3 mb-6">
-        {userMetrics.map((metric) => (
-          <div key={metric.label} className="rounded-xl border p-4" style={{ borderColor: "var(--border)", backgroundColor: "var(--card)" }}>
-            <p className="text-[10px] uppercase tracking-wider font-semibold" style={{ color: "var(--muted-foreground)" }}>{metric.label}</p>
-            <p className="text-2xl font-bold mt-2" style={{ color: "var(--foreground)" }}>{metric.value}</p>
-            <p className="text-xs mt-1" style={{ color: "var(--muted-foreground)" }}>{metric.note}</p>
-          </div>
-        ))}
-      </div>
-
-      <div className="rounded-xl border overflow-hidden" style={{ borderColor: "var(--border)" }}>
-        <div className="px-4 py-3 flex items-center justify-between gap-3" style={{ backgroundColor: "var(--muted)", borderBottom: "1px solid var(--border)" }}>
-          <div>
-            <p className="text-sm font-semibold" style={{ color: "var(--foreground)" }}>Key stats</p>
-            <p className="text-xs mt-0.5" style={{ color: "var(--muted-foreground)" }}>Metrics needed to evaluate the MVP</p>
-          </div>
-          <div className="text-[10px]" style={{ color: "var(--muted-foreground)" }}>
-            {activeMessages} active messages · {openQuestions} open questions
-          </div>
-        </div>
-        <div>
-          {keyStats.map((stat, index) => (
-            <div key={stat.label} className="grid items-center px-4 py-3 text-xs" style={{ gridTemplateColumns: "1fr 90px 90px 1.2fr", borderTop: index === 0 ? undefined : "1px solid var(--border)" }}>
-              <span className="font-medium" style={{ color: "var(--foreground)" }}>{stat.label}</span>
-              <span className="font-semibold" style={{ color: "var(--foreground)" }}>{stat.count}</span>
-              <span className="font-semibold" style={{ color: stat.label === "Unanswered" ? "var(--primary)" : "var(--accent)" }}>{stat.rate}</span>
-              <span style={{ color: "var(--muted-foreground)" }}>{stat.note}</span>
-            </div>
-          ))}
-        </div>
-      </div>
-    </div>
-  );
-}
 
 // ── AdminProactiveMessages ─────────────────────────────────────────────────────
 
@@ -3053,6 +3035,10 @@ function AdminProactiveMessages({
       <div className="flex items-start justify-between gap-4">
         <div>
           <h2 className="text-base font-semibold" style={{ color: "var(--foreground)" }}>Proactive Messages</h2>
+          <div className="mt-4 flex flex-wrap gap-4 text-sm">
+            {([2, 3] as const).map(day => <label key={day} className="flex flex-col gap-1">ข้อความเช็กอิน Day {day}<select aria-label={`ข้อความเช็กอิน Day ${day}`} className="border rounded-lg p-2 bg-white" value={plans.find(p => p.day === day && p.dailyEntry)?.id || ''} onChange={event => setPlans(prev => prev.map(p => p.day === day ? { ...p, dailyEntry: p.id === event.target.value } : p))}><option value="">ไม่ส่งเช็กอิน</option>{plans.filter(p => p.channel === 'chat' && p.day === day && p.status === 'active').map(p => <option value={p.id} key={p.id}>{p.name}</option>)}</select></label>)}
+          </div>
+          <p className="text-xs mt-2 text-stone-500">Day 1 ใช้ Welcome message • Day 2–3 ส่งเมื่อกลับมาและไม่มีคำถามเดิมค้างอยู่ • บันทึกด้วย Save changes</p>
           <p className="text-xs mt-1" style={{ color: "var(--muted-foreground)" }}>
             เลือก Welcome message หลัก 1 ข้อ แล้วให้ทุก IF / ELSE IF / ELSE ตอบเป็นข้อความหรือไปยังคำถามอื่น
           </p>
@@ -3526,6 +3512,7 @@ function AdminNotifications({
         Day เป็นข้อมูลหลังบ้านเท่านั้น ส่วนข้อความเวลาเป็นสิ่งที่ผู้เล่นเห็น เช่น “วันนี้ 09:00” ระบบ MVP จะแสดง Notification ที่ Active เมื่อผู้เล่นโหลดหน้าใหม่
       </div>
 
+      {!PUBLIC_TRIAL && <NpsSettings />}
       {notificationPlans.length === 0 ? (
         <div className="rounded-xl border p-8 text-center" style={{ borderColor: "var(--border)", backgroundColor: "var(--card)" }}>
           <Bell className="mx-auto mb-3" size={22} style={{ color: "var(--muted-foreground)" }} aria-hidden />
@@ -3663,12 +3650,14 @@ function AdminContentLibrary({
   const filtered = KNOWLEDGE.filter(
     (k) =>
       k.title.toLowerCase().includes(normalizedSearch) ||
+      answerConfigs.find(answer => answer.id === k.id)?.en?.title.toLowerCase().includes(normalizedSearch) ||
       k.topicId.toLowerCase().includes(normalizedSearch) ||
       k.category.toLowerCase().includes(normalizedSearch)
   );
   const filteredManualAnswers = manualAnswers.filter((answer) =>
     answer.title.toLowerCase().includes(normalizedSearch) ||
-    answer.keywords.some((keyword) => keyword.toLowerCase().includes(normalizedSearch))
+    answer.en?.title.toLowerCase().includes(normalizedSearch) ||
+    [...answer.keywords, ...(answer.en?.keywords || [])].some((keyword) => keyword.toLowerCase().includes(normalizedSearch))
   );
 
   const selected = selectedId ? KNOWLEDGE.find((k) => k.id === selectedId) : null;
@@ -3724,12 +3713,12 @@ function AdminContentLibrary({
   return (
     <div className="flex-1 overflow-hidden flex">
       {/* Table pane */}
-      <div className="flex flex-col overflow-hidden" style={{ width: selected ? "55%" : "100%" }}>
+      <div className="flex flex-col overflow-y-auto" style={{ width: selected ? "55%" : "100%" }}>
         <div className="px-5 pt-5 pb-3 shrink-0 flex flex-col gap-4">
           <div className="flex items-start justify-between gap-3">
             <div>
               <h2 className="text-base font-semibold" style={{ color: "var(--foreground)" }}>FAQ &amp; Content</h2>
-              <p className="text-xs mt-1" style={{ color: "var(--muted-foreground)" }}>เพิ่มคำตอบเองได้ ระบบจะค้น Manual Content ก่อนใช้ AI fallback</p>
+              <p className="text-xs mt-1" style={{ color: "var(--muted-foreground)" }}>คลังเดียว TH / EN · Keywords ที่บันทึกใช้ค้นหาจริง · พบคำตอบแล้วไม่เรียก AI</p>
             </div>
             <div className="flex items-center gap-2">
               <SaveChangesButton state={saveState} onClick={saveChanges} disabled={configStatus !== "ready"} />
@@ -3829,6 +3818,7 @@ function AdminContentLibrary({
                           style={{ border: "1px solid var(--border)", backgroundColor: "var(--card)", color: "var(--foreground)" }}
                         />
                       </label>
+                      <BilingualAnswerEditor answer={answer} onChange={update => patchAnswer(answer.id, update)} />
                       <div className="flex justify-end">
                         <button type="button" onClick={() => removeManualContent(answer.id)} className="text-xs" style={{ color: "var(--primary)" }}>ลบ Content นี้</button>
                       </div>
@@ -3887,6 +3877,18 @@ function AdminContentLibrary({
                       className="h-8 px-2 rounded-md text-[11px] outline-none"
                       style={{ border: "1px solid var(--border)", backgroundColor: "var(--background)", color: "var(--foreground)" }}
                     />
+                  </div>
+                  <label className="flex flex-col gap-1 mt-2 text-xs">
+                    คำถาม FAQ · English
+                    <input aria-label={`English FAQ — ${faq.id}`} value={faq.questionEn ?? FAQ_ENGLISH_BY_QUESTION[faq.question] ?? ''}
+                      onChange={event => patchFaq(faq.id, { questionEn: event.target.value, questionEnSource: undefined })}
+                      className="w-full rounded-md border px-2 py-2" style={{ borderColor: 'var(--border)', backgroundColor: 'var(--background)' }} />
+                  </label>
+                  <div className="flex flex-wrap items-center gap-2 mt-1 text-[11px]">
+                    <span>{englishFaqQuestion(faq) ? 'ตรงกับคำถามไทย' : 'คำแปลต้องอัปเดต / ยืนยัน · ยังไม่แสดงปุ่มใน EN'}</span>
+                    <button type="button" disabled={!(faq.questionEn ?? FAQ_ENGLISH_BY_QUESTION[faq.question])?.trim()}
+                      onClick={() => patchFaq(faq.id, { questionEn: faq.questionEn ?? FAQ_ENGLISH_BY_QUESTION[faq.question], questionEnSource: faq.question })}
+                      className="underline disabled:opacity-40">ยืนยันคำแปล FAQ</button>
                   </div>
                   <select
                     value={faq.topicId}
@@ -3965,8 +3967,8 @@ function AdminContentLibrary({
           <span>Source status</span>
         </div>
 
-        {/* Rows */}
-        <div className="flex-1 overflow-y-auto">
+        {/* Rows share the pane's scroll so bilingual FAQ fields cannot hide the catalog. */}
+        <div className="shrink-0">
           {filtered.map((k) => {
             const active = selectedId === k.id;
             return (
@@ -4035,6 +4037,16 @@ function AdminContentLibrary({
                   กด Save changes เพื่อเผยแพร่คำตอบนี้ให้ผู้เล่นเห็น
                 </p>
               </div>
+              <label className="flex flex-col gap-1 text-xs">
+                ชื่อหัวข้อ · TH
+                <input aria-label={`Thai title — ${selectedAnswer.id}`} value={selectedAnswer.title} onChange={event => patchAnswer(selectedAnswer.id, { title: event.target.value })}
+                  className="rounded-md border px-3 py-2" style={{ borderColor: 'var(--border)', backgroundColor: 'var(--card)' }} />
+              </label>
+              <label className="flex flex-col gap-1 text-xs">
+                Keywords · TH / คำเดิม (คั่นด้วย comma)
+                <input aria-label={`Thai keywords — ${selectedAnswer.id}`} value={selectedAnswer.keywords.join(', ')} onChange={event => patchAnswer(selectedAnswer.id, { keywords: event.target.value.split(',').map(value => value.trim()) })}
+                  className="rounded-md border px-3 py-2" style={{ borderColor: 'var(--border)', backgroundColor: 'var(--card)' }} />
+              </label>
               <label className="flex flex-col gap-1 text-[11px] font-medium" style={{ color: "var(--muted-foreground)" }}>
                 ข้อความนำ
                 <textarea
@@ -4080,6 +4092,11 @@ function AdminContentLibrary({
               </label>
             </section>
           )}
+
+          {selectedAnswer && <BilingualAnswerEditor answer={selectedAnswer} onChange={update => patchAnswer(selectedAnswer.id, update)} />}
+          <div className="sticky bottom-0 py-2 flex justify-end" style={{ backgroundColor: 'var(--card)' }}>
+            <SaveChangesButton state={saveState} onClick={saveChanges} disabled={configStatus !== 'ready'} />
+          </div>
 
           {selected.timeSensitive && (
             <p className="text-xs px-2.5 py-1.5 rounded-md"
@@ -4679,11 +4696,12 @@ function AdminUnansweredQuestions({
           <div>
             <h2 className="text-base font-semibold" style={{ color: "var(--foreground)" }}>Unanswered Questions</h2>
             <p className="text-xs mt-0.5" style={{ color: "var(--muted-foreground)" }}>
-              คำถามที่ยังไม่มีในฐานความรู้ · จาก player report
+              คำถามที่บันทึกจริง · ดูสาเหตุและกลุ่มคำถามในคำถามยอดนิยม
             </p>
           </div>
           <div className="flex items-center gap-2">
             <SaveChangesButton state={saveState} onClick={saveChanges} disabled={configStatus !== "ready" || !selected} />
+            <button className="text-sm border rounded-lg px-3 py-2" onClick={() => request('/api/admin/unanswered').then(data => setQuestions(data.questions.flatMap((q: unknown) => { const parsed = parseReportedQuestion(q); return parsed ? [parsed] : []; }))).catch(e => setSaveError(e.message))}>รีเฟรช</button>
             <span className="text-xs px-2 py-0.5 rounded-full font-semibold"
               style={{ backgroundColor: "rgba(196,30,30,0.08)", color: "var(--primary)" }}>
               {questions.filter((q) => q.status === "new").length} new
@@ -5066,7 +5084,8 @@ function AdminView({
   const newCount = reportedQuestions.filter((q) => q.status === "new").length;
 
   const navItems: { key: AdminTab; label: string; icon: React.ReactNode; badge?: number }[] = [
-    { key: "overview", label: "Overview", icon: <Eye size={15} aria-hidden /> },
+    { key: "overview", label: "วัดผล", icon: <Eye size={15} aria-hidden /> },
+    { key: "access", label: "การเข้าถึง", icon: <LockKeyhole size={15} aria-hidden /> },
     { key: "proactive-messages", label: "Proactive Messages", icon: <MessageCircle size={15} aria-hidden /> },
     { key: "notifications", label: "Notifications", icon: <Bell size={15} aria-hidden /> },
     { key: "faq-content", label: "FAQ & Content", icon: <BookOpen size={15} aria-hidden /> },
@@ -5131,7 +5150,9 @@ function AdminView({
 
       {/* Content area */}
       <main className="flex-1 overflow-hidden flex">
-        {tab === "overview" && <AdminOverview plans={deliveryPlans} reportedQuestions={reportedQuestions} />}
+        {PUBLIC_TRIAL && (tab === 'overview' || tab === 'access') && <div className="p-6 space-y-3"><h2 className="text-xl font-semibold">Guest pilot</h2><p>เปิดทดลองแบบไม่ล็อกอิน · ประวัติอยู่ในเบราว์เซอร์ผู้เล่น</p><p>Login / whitelist, สถิติรวม, การให้คะแนน และ NPS ยังไม่เปิดใช้งานใน production รอบนี้</p><p>FAQ & Content, Proactive Messages, Notifications, Unanswered Questions และ Version History ยังใช้ระบบ Supabase เดิม</p></div>}
+        {!PUBLIC_TRIAL && tab === "overview" && <LiveOverview />}
+        {!PUBLIC_TRIAL && tab === "access" && <AdminAccess />}
         {tab === "proactive-messages" && (
           <AdminProactiveMessages
             plans={deliveryPlans}
@@ -5204,7 +5225,7 @@ function AdminRoute({
   configRevision: number;
   configStatus: SharedConfigStatus;
 }) {
-  const devPreview = import.meta.env.DEV && new URLSearchParams(window.location.search).get("preview") === "1";
+  const devPreview = false;
   const [session, setSession] = useState<AdminSessionState>(devPreview ? "authenticated" : "checking");
 
   useEffect(() => {
@@ -5267,7 +5288,7 @@ function AdminRoute({
   }
 
   if (session !== "authenticated") {
-    return <AdminLoginScreen onAuthenticated={() => setSession("authenticated")} />;
+    return <AdminLoginScreen onAuthenticated={() => window.location.reload()} />;
   }
 
   return (
@@ -5294,9 +5315,18 @@ function AdminRoute({
 // ── App ────────────────────────────────────────────────────────────────────────
 
 export default function App() {
-  const [role, setRole] = useState<Role | null>(null);
-  const [segment, setSegment] = useState<PlayerSegment | null>(null);
-  const [reportedQuestions, setReportedQuestions] = useState<ReportedQuestion[]>(INITIAL_REPORTED_QUESTIONS);
+  const isAdmin = window.location.pathname === '/admin' || window.location.pathname.startsWith('/admin/');
+  const [experienced, setExperienced] = useState(false);
+  return <PlayerLanguageProvider>{isAdmin ? <AppContent /> : <AccountGate renderWelcome={({ onContinue, onSignIn, busy, status }) => experienced
+    ? <ExperiencedPlayerScreen onBack={() => setExperienced(false)} />
+    : <PlayerSegmentScreen busy={busy} status={status} onSignIn={onSignIn} onSelect={segment => segment === 'experienced' ? setExperienced(true) : onContinue(segment)} />
+  }><AppContent /></AccountGate>}</PlayerLanguageProvider>;
+}
+
+function AppContent() {
+  const account = useContext(AccountContext);
+  const [segment, setSegment] = useState<PlayerSegment | null>(account?.state.segment || null);
+  const [reportedQuestions, setReportedQuestions] = useState<ReportedQuestion[]>([]);
   const [answerConfigs, setAnswerConfigs] = useState<ChatAnswerConfig[]>(loadChatAnswers);
   const [faqConfigs, setFaqConfigs] = useState<FaqConfigItem[]>(loadFaqConfigs);
   const [deliveryPlans, setDeliveryPlans] = useState<DailyDeliveryPlan[]>(INITIAL_DAILY_DELIVERY_PLANS);
@@ -5428,48 +5458,11 @@ export default function App() {
 
   const isAdminRoute = window.location.pathname === "/admin" || window.location.pathname.startsWith("/admin/");
 
-  function handleReportQuestion(question: string, recentContext: string) {
-    const cleanQuestion = question.trim();
-    if (cleanQuestion.length < 2) return;
-    const normalized = cleanQuestion.toLowerCase();
-    const today = new Date().toISOString().slice(0, 10);
-    setReportedQuestions((prev) => {
-      const existing = prev.find((q) => q.question.trim().toLowerCase() === normalized);
-      if (existing) {
-        return prev.map((q) =>
-          q.id === existing.id
-            ? { ...q, count: q.count + 1, lastSeen: today, recentContext }
-            : q
-        );
-      }
-      const newEntry: ReportedQuestion = {
-        id: uid(),
-        question: cleanQuestion,
-        onboardingDay: 2,
-        count: 1,
-        firstSeen: today,
-        lastSeen: today,
-        status: "new",
-        recentContext,
-      };
-      return [...prev, newEntry];
-    });
-
-    void fetch("/api/unanswered", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ question: cleanQuestion, onboardingDay: 2, recentContext }),
-    })
-      .then(async (response) => response.ok ? parseReportedQuestion(await response.json()) : null)
-      .then((saved) => {
-        if (!saved) return;
-        setReportedQuestions((prev) => {
-          const matching = prev.find((item) => item.question.trim().toLowerCase() === normalized);
-          if (matching) return prev.map((item) => item.id === matching.id ? saved : item);
-          return [saved, ...prev];
-        });
-      })
-      .catch(() => undefined);
+  async function handleReportQuestion(question: string, recentContext: string) {
+    const saved = parseReportedQuestion(await request('/api/unanswered', { question, recentContext, onboardingDay: account?.day || 1 }));
+    if (!saved) throw new Error('ไม่สามารถบันทึกคำถามได้');
+    setReportedQuestions(prev => [...prev.filter(q => q.id !== saved.id), saved]);
+    return;
   }
 
   if (isAdminRoute) return (
@@ -5491,15 +5484,10 @@ export default function App() {
     />
   );
 
-  if (role === null) {
-    return <LoginScreen onLogin={() => {
-      setRole("player");
-      setSegment(null);
-    }} />;
-  }
+  if (configStatus === 'loading') return <div className="min-h-screen grid place-items-center">กำลังโหลดเนื้อหา…</div>;
 
   if (segment === null) {
-    return <PlayerSegmentScreen onSelect={setSegment} />;
+    return <PlayerSegmentScreen onSelect={next => { void request('/api/player/state', { state: { ...account?.state, segment: next } }, 'PUT').then(() => setSegment(next)).catch(() => window.dispatchEvent(new Event('rookie-access-expired'))); }} />;
   }
 
   if (segment === "experienced") {
@@ -5510,8 +5498,7 @@ export default function App() {
     <CoachScreen
       segment={segment}
       onLogout={() => {
-        setRole(null);
-        setSegment(null);
+        void request('/api/auth/logout', {}).then(() => window.location.reload());
       }}
       onReportQuestion={handleReportQuestion}
       answerConfigs={answerConfigs}

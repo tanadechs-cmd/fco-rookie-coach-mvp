@@ -4,6 +4,7 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
+    "local": "vite --host 127.0.0.1 --port 4173 --mode prototype",
     "dev": "vite --host 0.0.0.0",
     "build": "vite build",
     "preview": "vite preview",

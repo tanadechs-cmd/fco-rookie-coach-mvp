@@ -1,5 +1,26 @@
 # FCO Rookie Coach MVP
 
+## September local review
+
+Run `npm run local` and open `http://localhost:4173/` or `/admin`. This review runs a loopback-only persistent SQLite backend. Local admin credentials are generated in `.local/admin-password.txt`. Production builds now use the explicitly approved [guest-only pilot](docs/GUEST-PILOT-2026-10-15.md): browser-local player history, disabled player login/central analytics, existing protected Supabase admin/config/report endpoints. The local account/access/analytics adapter is not deployed as a public service.
+
+### Local AI connection (14 October 2026)
+
+- Put `AI_INSEA_API_KEY` in the ignored `.env.local` file, then run `npm run local`. Never use a `VITE_` prefix. Restart after changing server credentials.
+- The local `/api/chat` route reuses the production AI-INsea handler behind the existing localhost, origin and session checks. Both the web UI and API stay on `127.0.0.1:4173`.
+- The default destination is chatflow `24426`, published v1.3: GPT-6 Luna, reasoning None, temperature 0.2, maximum 768 completion tokens and a four-message contextual memory window.
+- Office-network API access was verified. This does not resolve Vercel's upstream 403; external hosting still needs an approved network/backend.
+- AI replies follow the latest question's language. The local bilingual update below adds stored English FAQ/knowledge answers; proactive messages and original videos are still in their configured language.
+
+### Bilingual knowledge (14 October 2026, local review)
+
+- All 48 default Hub topics have English title, answer, keywords and existing device-specific steps. These are translations of the stored Thai summaries/answers, not new transcripts or newly verified game mechanics. Review the prototype copy before public release.
+- Admin **FAQ & Content** supports English fields for both Hub and manual entries, plus English FAQ button labels. Thai and English share one content ID and video URL. Video cards identify Thai-language videos.
+- Free-text routing uses saved TH/EN answer keywords, with ASCII word boundaries. Removing a keyword removes that route; the legacy generic `pass` keyword cannot send ball-passing questions to Welcome Pass. The separate money-intent rule routes Thai/English earning questions to Welcome Pass + Mission Hub; its short combined introduction remains a fixed business rule.
+- Latest-question language controls stored replies independently of UI language; neutral labels such as `BP` keep the last clear conversation language. FAQ buttons follow the UI language. Matched answers need no model call; the existing AI-INsea fallback remains for unmatched questions.
+- `en.sourceSignature` tracks the Thai title, answer and device steps. After a Thai change or English edit, confirm the translation in Admin, then **Save changes**. A stale/missing translation returns a short English availability notice rather than outdated text. Unconfirmed/stale English FAQ labels stay hidden in English mode. “Current” means source-aligned, not team content approval.
+- Existing JSON configuration saves and version history preserve the new fields; no database migration is needed. Changes are visible to players after reloading. No cloud publication is included in this local update.
+
 Web prototype for proactive first-week FC Online onboarding support.
 
 ## Answer routing
@@ -9,7 +30,7 @@ Web prototype for proactive first-week FC Online onboarding support.
 3. Call the server-side `/api/chat` endpoint only for an unmatched question.
 4. `/api/chat` proxies to AI-INsea chatflow `24426`; the bearer token never enters the browser bundle.
 5. AI-INsea returns a concise answer plus zero to two trusted action IDs. The web app owns the approved destination URLs and renders them as buttons.
-6. If AI-INsea is unavailable, show related content, Discord escalation, and the report-to-team action.
+6. If AI-INsea is unavailable, show a connection-failure message, Discord escalation, and the report-to-team action; do not show unrelated learning cards.
 
 ## Input-specific coaching and short context
 
@@ -19,7 +40,7 @@ Web prototype for proactive first-week FC Online onboarding support.
 - Admin can create manual content with a title, keywords, and a deterministic answer. Player questions match manual content before the Education Hub snapshot and AI fallback.
 - Admin can add, edit, and remove FAQ chips, change their journey stage and keywords, and link one or two knowledge topics.
 - The high-priority money intent (for example `หาเงินจากไหน`) always routes to both Welcome Pass and Mission Hub before AI fallback.
-- AI fallback receives the six most recent user/assistant messages plus the selected input method. AI-INsea contextual memory remains enabled for eight messages; persistent cross-session AI memory stays off.
+- AI fallback receives the six most recent user/assistant messages plus the selected input method. AI-INsea v1.3 contextual memory is enabled for four messages; persistent cross-session AI memory stays off.
 
 The fallback prompt and response contract are documented in [`docs/AI-INSEA-FALLBACK-PROMPT.md`](docs/AI-INSEA-FALLBACK-PROMPT.md).
 

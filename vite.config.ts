@@ -1,12 +1,20 @@
-import { defineConfig, type HtmlTagDescriptor, type Plugin } from 'vite'
+import { defineConfig, loadEnv, type HtmlTagDescriptor, type Plugin } from 'vite'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 import path from 'node:path'
+import { localPrototype } from './local/server'
 
 import siteConfiguration from './.figma/make/site.json'
 
 // Vite config — https://vitejs.dev/config/
 export default defineConfig(({ mode }) => {
+  if (mode === 'prototype') {
+    const serverEnv = loadEnv(mode, process.cwd(), '')
+    // Explicit server-only allowlist. Do not expose these via define or VITE_.
+    for (const name of ['AI_INSEA_API_KEY', 'AI_INSEA_CHATFLOW_URL']) {
+      if (serverEnv[name]) process.env[name] = serverEnv[name]
+    }
+  }
   // .figma/make/deploy-preview passes `--mode development` for cached-preview builds.
   const emitSourcemaps = mode === 'development'
 
@@ -17,6 +25,7 @@ export default defineConfig(({ mode }) => {
       minify: !emitSourcemaps,
     },
     plugins: [
+      ...(mode === 'prototype' ? [localPrototype()] : []),
       react(),
       tailwindcss(),
       figmaSiteConfiguration(siteConfiguration),
